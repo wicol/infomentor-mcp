@@ -134,6 +134,16 @@ silently start a login.
   storage, recovery, and revocation behaviour.
 - [OpenCode V2 configuration example](docs/opencode.jsonc.example)
 
+## Acknowledgments
+
+- [Öppna Skolplattformen](https://github.com/kolplattformen/skolplattformen) —
+  reference for the Swedish guardian SSO and BankID flow.
+- [family-mcp](https://github.com/olafurns7/family-mcp) — informed auth/session
+  handling and provided a lead for investigating the Hub mobile protocol; its
+  Icelandic findings were treated as leads, not Swedish evidence.
+- [infomentor-api](https://github.com/CageHN/infomentor-api) — API and data-model
+  reference for InfoMentor.
+
 ## Development
 
 ```sh
