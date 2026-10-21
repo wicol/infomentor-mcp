@@ -39,33 +39,6 @@ cd infomentor-mcp
 uv sync
 ```
 
-## Authenticate
-
-```sh
-uv run infomentor-mcp auth login     # rotating QR in the terminal
-uv run infomentor-mcp auth status    # add --verify for a live read-only check
-```
-
-Prefer a browser screen? Serve the QR over HTTP:
-
-```sh
-# Loopback only, link is printed in the terminal:
-uv run infomentor-mcp auth login --method web-qr
-
-# Trusted LAN: the bind address and the address you actually open are separate.
-uv run infomentor-mcp auth login --method web-qr \
-  --host 0.0.0.0 --port 8765 --public-url http://login-host.local:8765
-```
-
-The web page shows a continuously updated QR and closes when the attempt ends.
-The link is a short-lived capability: anyone who has it can see the QR. LAN
-HTTP is unencrypted, so use a trusted network and never expose the port.
-Stockholm expires an unscanned order after roughly 30 seconds, so scan promptly
-once the code appears.
-
-The BankID autostart link (`--method url`) is also available. It contains a
-one-time secret; treat it like the QR.
-
 ## Run the MCP server
 
 ```sh
@@ -77,31 +50,81 @@ V2, copy [`docs/opencode.jsonc.example`](docs/opencode.jsonc.example) or merge
 the `mcp.servers.infomentor` object into your config, and set `cwd` to this
 checkout. Verified with a stdio client and OpenCode.
 
-To make the web QR reachable from another device while running under an MCP
-host:
+## Authentication
+
+### CLI
+
+```sh
+uv run infomentor-mcp auth login     # rotating QR in the terminal
+uv run infomentor-mcp auth status    # add --verify for a live read-only check
+```
+
+To use a browser on another screen, serve an animated QR page:
+
+```sh
+# Loopback only; the temporary viewer link is printed in the terminal.
+uv run infomentor-mcp auth login --method web-qr
+
+# Trusted LAN: bind address and browser-visible address are separate.
+uv run infomentor-mcp auth login --method web-qr \
+  --host 0.0.0.0 --port 8765 --public-url http://login-host.local:8765
+```
+
+The page shows a continuously updated QR and closes when the attempt ends. Its
+short-lived link is a capability: anyone who has it can see the QR. LAN HTTP is
+unencrypted; use a trusted network and never expose the port. Stockholm expires
+an unscanned order after roughly 30 seconds, so scan promptly once it appears.
+
+The BankID autostart-link flow is available with `--method url`. Its one-time
+link is sensitive; treat it like the QR. Approve the login yourself in BankID.
+
+### Agent-driven (MCP)
+
+When the MCP host runs on another machine or needs LAN access, configure the
+QR listener before starting the server:
 
 ```sh
 uv run infomentor-mcp serve --auth-host 0.0.0.0 --auth-port 8765 \
   --auth-public-url http://login-host.local:8765
 ```
 
+The agent starts login only at your request, shows the returned short-lived link,
+then waits with `auth_wait(login_id)`. Open the link on another screen and
+approve it in BankID; the agent receives the outcome as soon as the flow ends.
+The wait does not start or approve BankID for you. Mobile pairing is a separate
+explicit step after login.
+
 ## Tools
 
 | Tool | Purpose |
 | --- | --- |
-| `list_children()` | List linked children with stable IDs. |
-| `get_news(child_id?, offset, limit)` | News for one child, or all children when `child_id` is omitted. |
-| `auth_status()` | Stored-session and pairing metadata, or active login status. |
-| `auth_start(confirm, method)` | Start BankID (`url` or `web-qr`); requires explicit confirmation. |
-| `auth_progress(login_id)` | Sanitized progress and HTTP stage diagnostics. |
-| `auth_wait(login_id)` | Block until the attempt ends; returns immediately if already finished. |
 | `auth_cancel(login_id)` | Stop local polling and close the QR viewer. |
 | `auth_pair(confirm)` | Persist a long-lived mobile authorization after BankID. |
+| `auth_progress(login_id)` | Sanitized progress and HTTP stage diagnostics. |
 | `auth_revoke(confirm)` | Revoke the refresh credential, then remove it locally. |
+| `auth_start(confirm, method)` | Start BankID (`url` or `web-qr`); requires explicit confirmation. |
+| `auth_status()` | Stored-session and pairing metadata, or active login status. |
+| `auth_wait(login_id)` | Wait until the attempt ends; returns immediately if already finished. |
+| `get_news(child_id?, offset, limit)` | News for one child, or all children when `child_id` is omitted. |
+| `list_children()` | List linked children with stable IDs. |
 
 Authentication tools never return cookies or tokens, and `confirm` must be
 `true` after the user explicitly asks for the action. A failed read does not
 silently start a login.
+
+## Authentication flow
+
+The initial guardian login uses Stockholm's InfoMentor SSO: BankID approval is
+followed by a SAML handoff into InfoMentor Hub. It is not the mobile-app OAuth
+flow.
+
+After a successful login, users may explicitly pair the older InfoMentor Hub
+mobile-app authorization flow. We chose its refresh-capable protocol because it
+can obtain a fresh Hub session on demand after the ordinary web session expires,
+allowing a longer-lived session without repeating BankID. The maximum refresh
+authorization lifetime is unknown; renewal is on demand, not a background loop.
+See [mobile authentication notes](docs/mobile-auth.md) for protocol evidence
+and limits.
 
 ## Privacy and security
 
