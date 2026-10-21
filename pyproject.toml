@@ -1,0 +1,62 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "infomentor-mcp"
+version = "0.1.0"
+description = "Local, read-only MCP server for Swedish InfoMentor guardian accounts"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Wictor Olseryd" }]
+keywords = ["bankid", "infomentor", "mcp", "school", "sweden"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: End Users/Desktop",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Education",
+]
+dependencies = [
+  "httpx>=0.28,<1",
+  "keyring>=25,<27",
+  "mcp>=2,<3",
+  "pydantic>=2.10,<3",
+  "qrcode>=8,<9",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3,<9",
+  "pytest-httpx>=0.35,<1",
+  "ruff>=0.9,<1",
+]
+
+[project.scripts]
+infomentor-mcp = "infomentor_mcp.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/wicol/infomentor-mcp"
+Issues = "https://github.com/wicol/infomentor-mcp/issues"
+Security = "https://github.com/wicol/infomentor-mcp/security"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/infomentor_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+  "live: requires an explicitly authenticated local InfoMentor account",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
