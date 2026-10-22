@@ -28,6 +28,14 @@ no bounty program exists.
 - Non-loopback QR binding requires an explicit public origin and is unencrypted
   HTTP. Only use it on a trusted network, and never expose it to the internet.
 
+## Read receipts
+
+Childcare schedule retrieval includes comments by default. Hub's comment-read
+endpoint also marks those comments read; this is a verified server-side effect,
+not a separate write request. Use `include_comments=false` to leave them unopened.
+The MCP tool is not annotated read-only because of this effect. Schedule editing,
+absence registration and sending comments remain unavailable.
+
 ## Scope
 
 In scope: local credential storage, redaction, session locking, the temporary

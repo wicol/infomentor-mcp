@@ -40,7 +40,9 @@ def test_childcare_reads_requested_weeks_and_keeps_children_separate(
                 "endDate": (week + timedelta(days=6)).isoformat(), "days": rows,
             })
     try:
-        items = client.get_childcare_schedule(date(2026, 10, 23), date(2026, 10, 26), child_ids)
+        items = client.get_childcare_schedule(
+            date(2026, 10, 23), date(2026, 10, 26), child_ids, include_comments=False
+        )
         assert [(r.date.day, r.child_id) for r in items] == [
             (day, child) for day in (23, 26) for child in targets
         ]
@@ -56,6 +58,59 @@ def test_childcare_reads_requested_weeks_and_keeps_children_separate(
                 "date": f"2026-10-{19 if index % 2 == 0 else 26}T00:00:00.000Z",
                 "showNextWeekIfNoMoreSchoolDays": False,
             }
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("mode", ["default", "skip", "invalid", "http_failure"])
+def test_childcare_comments_only_open_returned_page_and_report_read_receipts(
+    monkeypatch, httpx_mock, mode,
+):
+    client = InfoMentorClient(AuthSession())
+    switches = []
+    monkeypatch.setattr(client, "_list_children", lambda: [
+        Child(id="first", name="Ada", selected=True),
+    ])
+    monkeypatch.setattr(client, "_select_child", lambda id_, _: switches.append(id_))
+    httpx_mock.add_response(url=ENDPOINT, json={
+        "startDate": "2026-10-19", "endDate": "2026-10-25", "days": [
+            {"date": f"2026-10-{day}", "onLeave": False, "isSchoolClosed": False,
+             "hasComments": True, "hasUnreadComments": True} for day in (19, 20)
+        ],
+    })
+    if mode != "skip":
+        httpx_mock.add_response(
+            url=ENDPOINT.replace("GetTimeRegistrations", "GetComments"),
+            status_code=503 if mode == "http_failure" else 200,
+            json={} if mode == "invalid" else {
+                "teacherComment": "Synthetic staff reply", "teacherName": "Staff",
+                "teacherCommentDate": "2026-10-20T09:00:00", "userComment": "Synthetic request",
+            },
+        )
+    try:
+        kwargs = {"include_comments": False} if mode == "skip" else {}
+        items = client.get_childcare_schedule(
+            date(2026, 10, 19), date(2026, 10, 20), offset=1, limit=1, **kwargs,
+        )
+        assert len(items) == 1 and items[0].date.day == 20
+        item = items[0]
+        if mode == "default":
+            assert item.comments_status == "loaded" and item.comments_marked_read
+            assert [c.author_type for c in item.comments] == ["staff", "guardian"]
+            assert not item.has_unread_comments
+        elif mode == "skip":
+            assert item.comments_status == "not_requested" and item.has_unread_comments
+            assert item.comments_marked_read is False
+        else:
+            assert item.comments_status == (
+                "invalid_response" if mode == "invalid" else "fetch_failed"
+            )
+            assert item.comments_marked_read is None
+        requests = httpx_mock.get_requests()
+        assert len(requests) == (1 if mode == "skip" else 2)
+        if mode != "skip":
+            assert json.loads(requests[-1].content) == {"date": "2026-10-20T00:00:00"}
+        assert switches[-1] == "first"
     finally:
         client.close()
 

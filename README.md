@@ -5,6 +5,9 @@ InfoMentor guardian accounts, authenticated with Stockholm BankID.
 
 > Unofficial project. Not affiliated with InfoMentor, Stockholm stad, or BankID.
 
+School records are not edited. Fetching childcare comments does mark them read
+in InfoMentor; use `include_comments=false` to leave comments unopened.
+
 ## What it does
 
 - Lists linked children and retrieves school news, optionally consolidated
@@ -103,7 +106,7 @@ link is sensitive; treat it like the QR. Approve the login yourself in BankID.
 | `auth_wait(login_id)` | Wait until the attempt ends; returns immediately if already finished. |
 | `get_attachments(child_id, news_id, attachment_id, attachment_mode)` | Read one discovered attachment as inline text. Separate calls may run in parallel. |
 | `get_calendar(start_date, end_date, child_ids?, offset, limit)` | Calendar events overlapping an inclusive Stockholm date range; earliest first. |
-| `get_childcare_schedule(start_date, end_date, child_ids?, offset, limit)` | Read Fritidsschema: each child's registered care times, leave and opening hours. |
+| `get_childcare_schedule(start_date, end_date, child_ids?, offset, limit, include_comments)` | Fritidsschema with comments by default; fetching comments marks them read. |
 | `get_news(child_ids?, offset, limit, include_attachments, attachment_mode)` | Unique news for selected children, or all when omitted; optionally include attachment text. |
 | `get_notifications(child_ids?, offset, limit)` | Pupil-linked notifications, newest first, with independent state per child. |
 | `list_children()` | List linked children with stable IDs. |
@@ -150,8 +153,17 @@ Each record includes `date`, `child_id`, `registration_id`, `starts_at`,
 `ends_at`, `opens_at`, `closes_at`, `on_leave` and `is_closed`, with times in
 `Europe/Stockholm`. Missing rows/times do not establish leave or no care need.
 The client requests exact weeks with automatic next-week fallback disabled and
-restores the original child selection. Comments are not opened; only their
-presence/unread flags are returned. No schedule or absence writes are exposed.
+restores the original child selection. No schedule edits or absence writes are exposed.
+
+`include_comments=true` is the default: days with comments on the returned page
+include staff and guardian text, authors and timestamps. **Hub marks comments
+read when fetched.** Set `include_comments=false` to retrieve only schedules and
+comment flags without opening comments. Comments outside the requested dates
+or page are not fetched. A per-day `comments_status` distinguishes `loaded`,
+`not_present`, `not_requested`, `fetch_failed` and `invalid_response`, so a failed
+comment request does not hide the schedule. `comments_marked_read=true` and
+`has_unread_comments=false` reflect a successful comment read; a null
+`comments_marked_read` means the outcome is unknown after a failed attempt.
 
 ### Notifications
 
@@ -244,7 +256,8 @@ persisting credentials; it cannot undo an upstream grant or rotation.
 ## Limitations
 
 - Version 0.1.0, beta. News, notifications, calendar, childcare schedules and child
-  listing are implemented; school-data operations stay read-only by design.
+  listing are implemented. No school-record editing is exposed, but childcare
+  comment retrieval marks comments read.
 - Child attribution is checked by selected pupil **name**, not by a verified
   pupil ID. Duplicate names or ignored switches fail closed.
 - Hub sessions are restored on demand, never by a background loop. The maximum

@@ -79,6 +79,13 @@ class CalendarEntry(BaseModel):
     retrieved_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
+class ChildcareComment(BaseModel):
+    author_type: str
+    author: str | None = None
+    text: str
+    sent_at: datetime | None = None
+
+
 class ChildcareDay(BaseModel):
     """One child's submitted childcare schedule, not classroom lesson times."""
 
@@ -95,6 +102,9 @@ class ChildcareDay(BaseModel):
     is_locked: bool | None = None
     has_comments: bool | None = None
     has_unread_comments: bool | None = None
+    comments: list[ChildcareComment] = Field(default_factory=list)
+    comments_status: str = "not_requested"
+    comments_marked_read: bool | None = False
     timezone: str = "Europe/Stockholm"
     source_type: str = "childcare_schedule"
     source_reference: str = "/TimeRegistration/TimeRegistration/GetTimeRegistrations/"

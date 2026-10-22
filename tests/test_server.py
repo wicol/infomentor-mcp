@@ -46,11 +46,13 @@ class FakeClient:
             ends_at=datetime.fromisoformat("2026-10-22T11:00:00+02:00"),
         ) for index in range(3)]
 
-    def get_childcare_schedule(self, start_date, end_date, child_ids):
+    def get_childcare_schedule(self, start_date, end_date, child_ids, *, include_comments=True,
+                              offset=0, limit=None):
         assert start_date.isoformat() == "2026-10-22" and end_date.isoformat() == "2026-10-30"
-        return [ChildcareDay(
+        items = [ChildcareDay(
             child_id="child-1", date=date(2026, 10, day), on_leave=False, is_closed=False,
         ) for day in (22, 23, 26)]
+        return items[offset : offset + limit if limit is not None else None]
 
     def get_news(self, child_ids: list[str] | None, *, offset=0, limit=None,
                  include_attachments=False) -> list[NewsItem]:

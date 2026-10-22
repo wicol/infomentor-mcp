@@ -29,6 +29,7 @@ from infomentor_mcp.client.models import (
     Attachment,
     CalendarEntry,
     Child,
+    ChildcareComment,
     ChildcareDay,
     NewsItem,
     Notification,
@@ -211,16 +212,20 @@ class InfoMentorClient:
 
     def get_childcare_schedule(
         self, start_date: date, end_date: date, child_ids: list[str] | None = None,
+        *, include_comments: bool = True, offset: int = 0, limit: int | None = None,
     ) -> list[ChildcareDay]:
         """Read submitted before/after-school and holiday care times, without editing."""
         if not 0 <= (end_date - start_date).days < MAX_CHILDCARE_DAYS:
             raise ValueError("Use end_date >= start_date and at most 31 calendar days.")
         return self._with_session_renewal(
-            lambda: self._get_childcare_schedule(start_date, end_date, child_ids)
+            lambda: self._get_childcare_schedule(
+                start_date, end_date, child_ids, include_comments, offset, limit
+            )
         )
 
     def _get_childcare_schedule(
         self, start_date: date, end_date: date, child_ids: list[str] | None,
+        include_comments: bool = True, offset: int = 0, limit: int | None = None,
     ) -> list[ChildcareDay]:
         children = self._list_children()
         selected = next((child for child in children if child.selected), None)
@@ -267,7 +272,20 @@ class InfoMentorClient:
                             "Childcare days were invalid or did not match the requested week."
                         ) from None
                     week += timedelta(days=7)
-            return sorted(items.values(), key=lambda item: (item.date, item.child_id))
+            page = sorted(items.values(), key=lambda item: (item.date, item.child_id))
+            page = page[offset : offset + limit if limit is not None else None]
+            if include_comments:
+                for day in page:
+                    if not (day.has_comments or day.has_unread_comments):
+                        day.comments_status = "not_present"
+                for child in targets:
+                    days = [day for day in page if day.child_id == child.id
+                            and (day.has_comments or day.has_unread_comments)]
+                    if days:
+                        self._select_child(child.id, linked_ids)
+                        for day in days:
+                            self._get_childcare_comments(day)
+            return page
         finally:
             if selected:
                 self._select_child(selected.id, linked_ids)
@@ -309,6 +327,37 @@ class InfoMentorClient:
             raise UnexpectedInfoMentorResponse(
                 "Childcare day had invalid dates, times or flags; values withheld."
             ) from None
+
+    def _get_childcare_comments(self, day: ChildcareDay) -> None:
+        # Hub marks comments read as part of this request, not via a separate write.
+        day.comments_marked_read = None  # An interrupted/invalid response has an unknown outcome.
+        try:
+            response = self._http.hub_post("/TimeRegistration/TimeRegistration/GetComments/", {
+                "date": day.date.isoformat() + "T00:00:00",
+            })
+            payload = response.json()
+            comments = []
+            for prefix, kind, name in (("teacher", "staff", "teacherName"),
+                                       ("user", "guardian", "userName")):
+                text = payload[prefix + "Comment"]
+                if text is not None and not isinstance(text, str):
+                    raise ValueError("Invalid comment text")
+                if text:
+                    sent = payload.get(prefix + "CommentDate")
+                    comments.append(ChildcareComment(
+                        author_type=kind, author=_string_or_none(payload.get(name)), text=text,
+                        sent_at=_stockholm_datetime(sent) if sent else None,
+                    ))
+            day.comments = comments
+            day.comments_status = "loaded"
+            day.comments_marked_read = True
+            day.has_unread_comments = False
+        except AuthenticationExpiredError:
+            raise  # Reuse the existing guarded session-renewal/replay path.
+        except (InfoMentorError, httpx.HTTPError):
+            day.comments_status = "fetch_failed"
+        except (ValueError, KeyError, TypeError, AttributeError):
+            day.comments_status = "invalid_response"
 
     def get_calendar(
         self, start_date: date, end_date: date, child_ids: list[str] | None = None,
