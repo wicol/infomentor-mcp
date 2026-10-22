@@ -84,27 +84,33 @@ link is sensitive; treat it like the QR. Approve the login yourself in BankID.
 
 ### Agent-driven (MCP)
 
-When the MCP host runs on another machine or needs LAN access, configure the
-QR listener before starting the server:
+1. Configure InfoMentor MCP in your agent's MCP client (see
+   [Run the MCP server](#run-the-mcp-server)).
+2. Ask your agent to log in to InfoMentor.
+3. The agent asks whether you want a **BankID link on your phone** or a
+   **web QR code to scan from another screen**, then starts that flow and
+   gives you the link.
+4. Open the link and approve the login yourself in BankID. The agent waits
+   for the result and lets you know when you are signed in.
+
+No separate CLI login is needed. Mobile pairing for longer-lived access is
+a separate action that the agent can perform with your explicit approval.
+
+If your MCP server runs on another machine, configure a browser-reachable
+address for web QR in its launch command:
 
 ```sh
 uv run infomentor-mcp serve --auth-host 0.0.0.0 --auth-port 8765 \
   --auth-public-url http://login-host.local:8765
 ```
 
-The agent calls `auth_start(confirm=true, method=...)` only at your request:
+Use only a trusted LAN; the viewer uses unencrypted HTTP. Both login links are
+sensitive and short-lived. Web QR starts the BankID order when you open the
+viewer; a BankID app-link order starts immediately, so open that link promptly.
 
-- `web-qr`: open the viewer link on another screen and scan with your BankID
-  phone. The BankID order starts when the browser first requests a QR frame,
-  not when the agent creates the link, so chat delivery does not consume the
-  short scanning window.
-- `url`: open the sensitive, short-lived autostart link on the phone running
-  BankID. This starts the order immediately; open it promptly.
-
-After showing the link in an intermediate message, the agent calls
-`auth_wait(login_id)` and receives the outcome as soon as the flow ends. You
-approve the login yourself in BankID. Mobile pairing is a separate explicit
-step after login; it is never triggered automatically by a failed read.
+For agent implementers: use `auth_start` only after user approval, show the
+returned link in an intermediate message, then call `auth_wait(login_id)`.
+Ask which method fits the user's device unless they already specified one.
 
 ## Tools
 
