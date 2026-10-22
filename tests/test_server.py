@@ -5,7 +5,7 @@ import httpx
 
 from infomentor_mcp.auth.session import AuthSession
 from infomentor_mcp.client.http import AuthenticationExpiredError
-from infomentor_mcp.client.models import Child, NewsItem
+from infomentor_mcp.client.models import Child, NewsItem, Notification
 from infomentor_mcp.server import create_server
 
 
@@ -30,6 +30,11 @@ class FakeClient:
     def list_children(self) -> list[Child]:
         return [Child(id="child-1", name="Synthetic Child", selected=True)]
 
+    def get_notifications(self, child_ids):
+        return [Notification(
+            id=str(index), child_ids=child_ids or ["child-1"], states={"child-1": "New"}
+        ) for index in range(3)]
+
     def get_news(self, child_ids: list[str] | None, *, offset=0, limit=None,
                  include_attachments=False) -> list[NewsItem]:
         items = [
@@ -52,7 +57,7 @@ def test_server_registers_only_verified_data_tools() -> None:
 
     assert {tool.name for tool in tools} == {
         "auth_status", "auth_start", "auth_progress", "auth_cancel", "auth_pair", "auth_revoke",
-        "auth_wait", "get_news", "get_attachments", "list_children",
+        "auth_wait", "get_news", "get_attachments", "get_notifications", "list_children",
     }
 
 
@@ -72,6 +77,21 @@ def test_data_tools_explain_missing_authentication() -> None:
     result = asyncio.run(server.call_tool("list_children", {}))
 
     assert result.structured_content["error"]["code"] == "authentication_required"
+
+
+def test_notifications_tool_paginates_and_is_read_only():
+    async def scenario():
+        server = create_server(MemorySessionStore(AuthSession()), FakeClient)
+        result = await server.call_tool("get_notifications", {
+            "child_ids": ["child-1"], "offset": 1, "limit": 1,
+        })
+        assert [item["id"] for item in result.structured_content["items"]] == ["1"]
+        invalid = await server.call_tool("get_notifications", {"limit": 0})
+        assert invalid.structured_content["error"]["code"] == "invalid_pagination"
+        tool = next(t for t in await server.list_tools() if t.name == "get_notifications")
+        assert tool.annotations.read_only_hint
+
+    asyncio.run(scenario())
 
 
 def test_rejected_mobile_authorization_is_reported_as_auth_required():

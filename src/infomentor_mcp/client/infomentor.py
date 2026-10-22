@@ -23,7 +23,7 @@ from infomentor_mcp.client.http import (
     InfoMentorError,
     InfoMentorHttpClient,
 )
-from infomentor_mcp.client.models import Attachment, Child, NewsItem
+from infomentor_mcp.client.models import Attachment, Child, NewsItem, Notification
 
 _PUPIL_SWITCH_PATH = re.compile(r"/Account/PupilSwitcher/SwitchPupil/([^/?#'\"\\]+)", re.I)
 _SELECTED_PUPIL_NAME = re.compile(r"selectedPupilName\s*:\s*'((?:\\.|[^'])*)'", re.I)
@@ -197,6 +197,86 @@ class InfoMentorClient:
                     self._select_child(self._original_child_id, set(self._expected_names))
 
         return self._with_session_renewal(fetch)
+
+    def get_notifications(self, child_ids: list[str] | None = None) -> list[Notification]:
+        """Read pupil-linked notifications without marking them seen/read or following links."""
+        return self._with_session_renewal(lambda: self._get_notifications(child_ids))
+
+    def _get_notifications(self, child_ids: list[str] | None) -> list[Notification]:
+        children = self._list_children()
+        selected = next((child for child in children if child.selected), None)
+        targets = (
+            [self._find_child(children, id_) for id_ in dict.fromkeys(child_ids)]
+            if child_ids is not None else children
+        )
+        linked_ids = {child.id for child in children}
+        items: dict[str, Notification] = {}
+        owners: dict[tuple[str, str], str] = {}
+        try:
+            for child in targets:
+                self._select_child(child.id, linked_ids)
+                response = self._http.hub_post(
+                    "/NotificationApp/NotificationApp/GetNotifications", {}
+                )
+                try:
+                    payload = response.json()
+                    rows = payload["notifications"]
+                    if not isinstance(rows, list):
+                        raise ValueError("Not a list")
+                except (ValueError, KeyError, TypeError):
+                    raise UnexpectedInfoMentorResponse(
+                        "Notification response did not contain a notifications list."
+                    ) from None
+                selected_identity = None
+                for row in rows:
+                    if not isinstance(row, dict) or not isinstance(
+                        row.get("currentlySelectedPupil"), bool
+                    ):
+                        raise UnexpectedInfoMentorResponse(
+                            "Notification response did not identify selected-pupil records."
+                        )
+                    if not row["currentlySelectedPupil"]:
+                        continue
+                    # These upstream pupil IDs differ from the switcher IDs. Do not guess
+                    # a mapping; bind selected records to the verified selection instead.
+                    identity = (row.get("pupilIM2Id"), row.get("pupilSourceId"))
+                    if any(isinstance(v, bool) or not isinstance(v, (int, str))
+                           or not str(v).strip() for v in (*identity, row.get("id"))):
+                        raise UnexpectedInfoMentorResponse("Notification identity was missing.")
+                    identity = tuple(str(v) for v in identity)
+                    if (
+                        selected_identity is not None and selected_identity != identity
+                        or identity in owners and owners[identity] != child.id
+                    ):
+                        raise UnexpectedInfoMentorResponse(
+                            "Notification pupil selection was ambiguous; no notifications returned."
+                        )
+                    owners[identity] = child.id
+                    selected_identity = identity
+                    id_ = str(row["id"])
+                    state = _string_or_none(row.get("state"))
+                    if id_ in items:
+                        if child.id not in items[id_].child_ids:
+                            items[id_].child_ids.append(child.id)
+                        items[id_].states[child.id] = state
+                    else:
+                        items[id_] = Notification(
+                            id=id_, child_ids=[child.id], states={child.id: state},
+                            title=_string_or_none(row.get("title")),
+                            subtitle=_string_or_none(row.get("subTitle")),
+                            subjects_courses=_string_or_none(row.get("subjectsCourses")),
+                            sent_at=_string_or_none(row.get("dateSent")),
+                            order_date=_string_or_none(row.get("orderDate")),
+                            app_type=_string_or_none(row.get("appType")),
+                            notification_type=_string_or_none(row.get("type")),
+                            source_reference=_string_or_none(row.get("url")),
+                        )
+            return sorted(
+                items.values(), key=lambda item: item.order_date or item.sent_at or "", reverse=True
+            )
+        finally:
+            if selected:
+                self._select_child(selected.id, linked_ids)
 
     def _read_attachment(self, news_id: str, attachment: Attachment) -> Attachment:
         result = attachment.model_copy(deep=True)

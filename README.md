@@ -107,6 +107,7 @@ explicit step after login.
 | `auth_wait(login_id)` | Wait until the attempt ends; returns immediately if already finished. |
 | `get_attachments(child_id, news_id, attachment_id, attachment_mode)` | Read one discovered attachment as inline text. Separate calls may run in parallel. |
 | `get_news(child_ids?, offset, limit, include_attachments, attachment_mode)` | Unique news for selected children, or all when omitted; optionally include attachment text. |
+| `get_notifications(child_ids?, offset, limit)` | Pupil-linked notifications, newest first, with independent state per child. |
 | `list_children()` | List linked children with stable IDs. |
 
 Authentication tools never return cookies or tokens, and `confirm` must be
@@ -118,6 +119,22 @@ for every requested child who received the post. Pagination applies after
 deduplication and sorting, so `limit=10` means ten unique news items. Pass a
 one-element `child_ids` list for a single child; an empty list selects none.
 This replaces the earlier singular `child_id` argument and response field.
+
+### Notifications
+
+`get_notifications` reads notifications for the requested `child_ids`, or all
+linked children when omitted; an empty list selects none. Shared server IDs are
+merged before pagination. Each item includes `child_ids` and a `states` map
+(child ID to upstream state, such as `New`, `Seen`, `Read` or `Cleared`), because
+the same notification can have different states for different children. Items
+are sorted by Hub's `orderDate`, falling back to `dateSent`, newest first.
+
+Hub returns account-wide records. The client filters `currentlySelectedPupil`
+after each verified child switch, rather than guessing a mapping between Hub's
+different pupil ID types, and restores the original selection afterwards.
+Only the read endpoint is called; the separate state-update endpoint is never
+used. Notifications are not marked seen/read/cleared, and their destination
+links are not opened. Reading a message notification does not fetch the message.
 
 ### Attachments
 
@@ -174,7 +191,7 @@ and limits.
 
 ## Limitations
 
-- Version 0.1.0, beta. Only news and child listing are implemented; school-data
+- Version 0.1.0, beta. News, notifications and child listing are implemented; school-data
   operations stay read-only by design.
 - Child attribution is checked by selected pupil **name**, not by a verified
   pupil ID. Duplicate names or ignored switches fail closed.
