@@ -96,7 +96,8 @@ def test_news_fetches_only_page_attachments_once_and_restores_selection(
     if mode != "metadata":
         httpx_mock.add_response(url="https://hub.infomentor.se" + URL, content=docx)
     try:
-        items = client.get_news(limit=1, include_attachments=mode == "inline")
+        kwargs = {} if mode == "inline" else {"include_attachments": False}
+        items = client.get_news(limit=1, **kwargs)
         assert len(items) == 1
         assert items[0].child_ids == ["first", "second"]
         expected_status = "extracted" if mode == "inline" else "available"

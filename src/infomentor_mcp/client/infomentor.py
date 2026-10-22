@@ -131,7 +131,7 @@ class InfoMentorClient:
 
     def get_news(
         self, child_ids: list[str] | None = None, *, offset: int = 0, limit: int | None = None,
-        include_attachments: bool = False,
+        include_attachments: bool = True,
     ) -> list[NewsItem]:
         """Get unique news, newest first, for selected children or all linked children."""
         return self._with_session_renewal(

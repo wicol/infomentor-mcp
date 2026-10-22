@@ -16,8 +16,8 @@ in InfoMentor; use `include_comments=false` to leave comments unopened.
   within a chosen date range; shared items are deduplicated.
 - Reads each child's submitted childcare schedule (Fritidsschema), including
   registered times, leave and care opening hours.
-- Extracts PDF/DOCX news attachment text inline, optionally in the same call
-  as the news feed, without saving files to disk.
+- Includes PDF/DOCX news attachment text inline by default, without saving
+  files to disk.
 - Keeps one verified session across restarts, in the OS keyring or a `0600`
   file.
 - Logs in with BankID via terminal QR, an animated web QR page, or an app
@@ -107,7 +107,7 @@ link is sensitive; treat it like the QR. Approve the login yourself in BankID.
 | `get_attachments(child_id, news_id, attachment_id, attachment_mode)` | Read one discovered attachment as inline text. Separate calls may run in parallel. |
 | `get_calendar(start_date, end_date, child_ids?, offset, limit)` | Calendar events overlapping an inclusive Stockholm date range; earliest first. |
 | `get_childcare_schedule(start_date, end_date, child_ids?, offset, limit, include_comments)` | Fritidsschema with comments by default; fetching comments marks them read. |
-| `get_news(child_ids?, offset, limit, include_attachments, attachment_mode)` | Unique news for selected children, or all when omitted; optionally include attachment text. |
+| `get_news(child_ids?, offset, limit, include_attachments, attachment_mode)` | Unique news for selected children, or all when omitted; attachment text included by default. |
 | `get_notifications(child_ids?, offset, limit)` | Pupil-linked notifications, newest first, with independent state per child. |
 | `list_children()` | List linked children with stable IDs. |
 
@@ -183,9 +183,10 @@ links are not opened. Reading a message notification does not fetch the message.
 
 ### Attachments
 
-News items always include `attachments` metadata (`id`, `name`, `status`). Set
-`include_attachments=true` on `get_news` to receive PDF/DOCX text in the same
-response — useful for posts whose actual newsletter is only in a file. Only
+News items always include `attachments` metadata (`id`, `name`, `status`).
+`get_news` defaults to `include_attachments=true`, returning PDF/DOCX text in
+the same response — useful for posts whose actual newsletter is only in a file.
+Set `include_attachments=false` for metadata only, without fetching files. Only
 attachments on the returned page are fetched, and shared files are fetched once
 per call. Each attachment has its own `status`, `text` and `truncated` fields.
 
