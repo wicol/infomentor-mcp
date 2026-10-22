@@ -1,10 +1,10 @@
 # Experimental Hub mobile authentication
 
 This implementation uses the older **InfoMentor Hub** app protocol. Initial
-pairing and revocation are explicit CLI actions. Existing bound credentials
-can now restore an expired Hub session on demand through the normal MCP/client
-read path. It never registers push notifications, installs an APK, or modifies
-school records.
+pairing and revocation are explicit, confirmation-gated CLI or MCP actions.
+Existing bound credentials can restore an expired Hub session on demand through
+the normal MCP/client read path. It never registers push notifications,
+installs an APK, or modifies school records.
 
 ## Evidence
 
@@ -50,6 +50,12 @@ After an ordinary user-approved BankID web login:
 uv run infomentor-mcp auth mobile-discover
 uv run infomentor-mcp auth mobile-pair --confirm
 ```
+
+With an MCP client, the equivalent pairing action is `auth_pair(confirm=true)`
+after a successful BankID login. Revocation is `auth_revoke(confirm=true)`,
+equivalent to `auth mobile-revoke --confirm` below. Both require explicit user
+approval; neither runs automatically when a school-data read fails. The CLI
+discovery and test commands below are not separate MCP tools.
 
 Pairing explicitly creates a new app authorization. It generates its **own**
 random UUID and an identifying `InfoMentor MCP` device name. It does not copy

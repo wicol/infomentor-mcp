@@ -14,6 +14,10 @@ no write access to school data.
 
 - Lists linked children and retrieves school news, optionally consolidated
   across all of them.
+- Reads notifications with independent state per child, and calendar events
+  within a chosen date range; shared items are deduplicated.
+- Extracts PDF/DOCX news attachment text inline, optionally in the same call
+  as the news feed, without saving files to disk.
 - Keeps one verified session across restarts, in the OS keyring or a `0600`
   file.
 - Logs in with BankID via terminal QR, an animated web QR page, or an app
@@ -88,11 +92,19 @@ uv run infomentor-mcp serve --auth-host 0.0.0.0 --auth-port 8765 \
   --auth-public-url http://login-host.local:8765
 ```
 
-The agent starts login only at your request, shows the returned short-lived link,
-then waits with `auth_wait(login_id)`. Open the link on another screen and
-approve it in BankID; the agent receives the outcome as soon as the flow ends.
-The wait does not start or approve BankID for you. Mobile pairing is a separate
-explicit step after login.
+The agent calls `auth_start(confirm=true, method=...)` only at your request:
+
+- `web-qr`: open the viewer link on another screen and scan with your BankID
+  phone. The BankID order starts when the browser first requests a QR frame,
+  not when the agent creates the link, so chat delivery does not consume the
+  short scanning window.
+- `url`: open the sensitive, short-lived autostart link on the phone running
+  BankID. This starts the order immediately; open it promptly.
+
+After showing the link in an intermediate message, the agent calls
+`auth_wait(login_id)` and receives the outcome as soon as the flow ends. You
+approve the login yourself in BankID. Mobile pairing is a separate explicit
+step after login; it is never triggered automatically by a failed read.
 
 ## Tools
 
@@ -182,6 +194,11 @@ embedded files or external resources. Truncation and skipped files are explicit.
 Scanned PDFs without text return `ocr_required`; OCR, legacy `.doc` and other
 file types are not supported. Malformed/oversized files have per-file status
 instead of hiding the other news items.
+
+PDF extraction only reads the existing text layer. Mixed image/text PDFs may
+return `extracted` even when most visible content is missing: a poster with
+only a text link is one observed example. That status does not guarantee full
+document coverage; detecting these cases reliably requires OCR or visual review.
 
 ## Authentication flow
 
