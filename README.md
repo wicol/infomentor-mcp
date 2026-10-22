@@ -93,25 +93,6 @@ link is sensitive; treat it like the QR. Approve the login yourself in BankID.
 4. Open the link and approve the login yourself in BankID. The agent waits
    for the result and lets you know when you are signed in.
 
-No separate CLI login is needed. Mobile pairing for longer-lived access is
-a separate action that the agent can perform with your explicit approval.
-
-If your MCP server runs on another machine, configure a browser-reachable
-address for web QR in its launch command:
-
-```sh
-uv run infomentor-mcp serve --auth-host 0.0.0.0 --auth-port 8765 \
-  --auth-public-url http://login-host.local:8765
-```
-
-Use only a trusted LAN; the viewer uses unencrypted HTTP. Both login links are
-sensitive and short-lived. Web QR starts the BankID order when you open the
-viewer; a BankID app-link order starts immediately, so open that link promptly.
-
-For agent implementers: use `auth_start` only after user approval, show the
-returned link in an intermediate message, then call `auth_wait(login_id)`.
-Ask which method fits the user's device unless they already specified one.
-
 ## Tools
 
 | Tool | Purpose |
