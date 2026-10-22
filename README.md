@@ -105,12 +105,18 @@ explicit step after login.
 | `auth_start(confirm, method)` | Start BankID (`url` or `web-qr`); requires explicit confirmation. |
 | `auth_status()` | Stored-session and pairing metadata, or active login status. |
 | `auth_wait(login_id)` | Wait until the attempt ends; returns immediately if already finished. |
-| `get_news(child_id?, offset, limit)` | News for one child, or all children when `child_id` is omitted. |
+| `get_news(child_ids?, offset, limit)` | Unique news for selected children, or all when omitted; newest first. |
 | `list_children()` | List linked children with stable IDs. |
 
 Authentication tools never return cookies or tokens, and `confirm` must be
 `true` after the user explicitly asks for the action. A failed read does not
 silently start a login.
+
+`get_news` merges shared posts by the server's news ID and returns `child_ids`
+for every requested child who received the post. Pagination applies after
+deduplication and sorting, so `limit=10` means ten unique news items. Pass a
+one-element `child_ids` list for a single child; an empty list selects none.
+This replaces the earlier singular `child_id` argument and response field.
 
 ## Authentication flow
 

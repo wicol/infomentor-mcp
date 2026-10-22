@@ -108,24 +108,31 @@ class InfoMentorClient:
                 self._select_child(original_id, child_id_set)
         return children
 
-    def get_news(self, child_id: str | None = None) -> list[NewsItem]:
-        """Get news for one child, or all linked children while restoring selection."""
-        return self._with_session_renewal(lambda: self._get_news(child_id))
+    def get_news(self, child_ids: list[str] | None = None) -> list[NewsItem]:
+        """Get unique news, newest first, for selected children or all linked children."""
+        return self._with_session_renewal(lambda: self._get_news(child_ids))
 
-    def _get_news(self, child_id: str | None) -> list[NewsItem]:
+    def _get_news(self, child_ids: list[str] | None) -> list[NewsItem]:
         children = self._list_children()
         selected = next((child for child in children if child.selected), None)
-        targets = [self._find_child(children, child_id)] if child_id else children
+        targets = (
+            [self._find_child(children, child_id) for child_id in dict.fromkeys(child_ids)]
+            if child_ids is not None else children
+        )
         child_id_set = {child.id for child in children}
-        items: list[NewsItem] = []
+        items: dict[str, NewsItem] = {}
         try:
             for child in targets:
                 self._select_child(child.id, child_id_set)
-                items.extend(self._get_selected_child_news(child.id))
+                for item in self._get_selected_child_news(child.id):
+                    if item.id not in items:
+                        items[item.id] = item
+                    elif child.id not in items[item.id].child_ids:
+                        items[item.id].child_ids.append(child.id)
         finally:
             if selected:
                 self._select_child(selected.id, child_id_set)
-        return items
+        return sorted(items.values(), key=lambda item: item.published_at or "", reverse=True)
 
     def _with_session_renewal(self, operation):
         process_lock = self._lock_store.locked()
@@ -297,7 +304,7 @@ class InfoMentorClient:
         item_id = str(item["id"])
         return NewsItem(
             id=item_id,
-            child_id=child_id,
+            child_ids=[child_id],
             title=_string_or_none(item.get("title")),
             content=_string_or_none(item.get("content")),
             published_at=_string_or_none(item.get("publishedDate")),

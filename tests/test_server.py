@@ -30,15 +30,16 @@ class FakeClient:
     def list_children(self) -> list[Child]:
         return [Child(id="child-1", name="Synthetic Child", selected=True)]
 
-    def get_news(self, child_id: str | None) -> list[NewsItem]:
+    def get_news(self, child_ids: list[str] | None) -> list[NewsItem]:
         return [
             NewsItem(
-                id="news-1",
-                child_id=child_id or "child-1",
+                id=f"news-{index}",
+                child_ids=child_ids if child_ids is not None else ["child-1"],
                 title="Synthetic news",
-                source_reference="/#/communication/news/news-1",
-                raw={"id": "news-1"},
+                source_reference=f"/#/communication/news/news-{index}",
+                raw={"id": f"news-{index}"},
             )
+            for index in range(1, 4)
         ]
 
 
@@ -56,9 +57,11 @@ def test_server_registers_only_verified_data_tools() -> None:
 def test_news_tool_returns_structured_data() -> None:
     server = create_server(MemorySessionStore(AuthSession()), FakeClient)
 
-    result = asyncio.run(server.call_tool("get_news", {"child_id": "child-1"}))
+    result = asyncio.run(server.call_tool("get_news", {"child_ids": ["child-1"]}))
 
-    assert result.structured_content["items"][0]["child_id"] == "child-1"
+    assert result.structured_content["items"][0]["child_ids"] == ["child-1"]
+    page = asyncio.run(server.call_tool("get_news", {"offset": 1, "limit": 1}))
+    assert [item["id"] for item in page.structured_content["items"]] == ["news-2"]
 
 
 def test_data_tools_explain_missing_authentication() -> None:

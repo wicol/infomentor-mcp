@@ -36,7 +36,7 @@ def test_rejects_unknown_child_before_switching(httpx_mock) -> None:
     client = InfoMentorClient(session)
 
     with pytest.raises(ValueError, match="not linked"):
-        client.get_news("unknown")
+        client.get_news(["unknown"])
 
     client.close()
 
@@ -67,9 +67,9 @@ def test_maps_news_to_the_requested_child(httpx_mock) -> None:
     )
     client = InfoMentorClient(session)
 
-    news = client.get_news("first")
+    news = client.get_news(["first"])
 
-    assert news[0].child_id == "first"
+    assert news[0].child_ids == ["first"]
     assert news[0].title == "Synthetic title"
     client.close()
 
@@ -85,6 +85,43 @@ def test_ignored_child_switch_rejected_before_read(httpx_mock) -> None:
         with pytest.raises(UnexpectedInfoMentorResponse, match="did not confirm"):
             client._select_child("second", {"first", "second"})
         assert all(request.method != "POST" for request in httpx_mock.get_requests())
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("requested, expected", [
+    (None, ["second", "shared", "first", "undated"]),
+    (["first", "second", "first"], ["second", "shared", "first", "undated"]),
+    (["first"], ["shared", "first", "undated"]),
+    ([], []),
+])
+def test_news_merges_child_ids_and_sorts(monkeypatch, requested, expected):
+    client = InfoMentorClient(AuthSession())
+    children = [Child(id="first", name="Ada", selected=True), Child(id="second", name="Bo")]
+    switches = []
+    reads = []
+    monkeypatch.setattr(client, "_list_children", lambda: children)
+    monkeypatch.setattr(client, "_select_child", lambda child_id, _: switches.append(child_id))
+
+    def read(child_id):
+        reads.append(child_id)
+        dates = {"first": "2026-10-01", "second": "2026-10-03", "shared": "2026-10-02"}
+        ids = [child_id, "shared", "shared"] + (["undated"] if child_id == "first" else [])
+        return [client._parse_news_item(child_id, {"id": id_, "publishedDate": dates.get(id_)})
+                for id_ in ids]
+
+    monkeypatch.setattr(client, "_get_selected_child_news", read)
+    try:
+        news = client.get_news(requested)
+        assert [item.id for item in news] == expected
+        expected_reads = list(dict.fromkeys(requested)) if requested is not None else [
+            "first", "second"
+        ]
+        assert reads == expected_reads
+        assert switches[-1] == "first"
+        shared = next((item for item in news if item.id == "shared"), None)
+        if shared:
+            assert shared.child_ids == reads
     finally:
         client.close()
 

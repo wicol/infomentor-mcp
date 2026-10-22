@@ -22,7 +22,7 @@ class NewsItem(BaseModel):
     """A school-news item, retaining its original API payload for completeness."""
 
     id: str
-    child_id: str
+    child_ids: list[str]
     title: str | None = None
     content: str | None = None
     published_at: str | None = None

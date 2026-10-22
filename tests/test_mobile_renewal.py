@@ -69,10 +69,10 @@ def test_expired_hub_and_access_refresh_then_replay_news_once(httpx_mock, capsys
     client = InfoMentorClient(store.load(), session_store=store)
     original_http = client._http
     try:
-        news = client.get_news("first")
+        news = client.get_news(["first"])
         assert client._http is not original_http
         assert original_http.client.is_closed
-        assert news[0].child_id == "first"
+        assert news[0].child_ids == ["first"]
         expected_refresh = "new-refresh" if access_expired else "old-refresh"
         assert tokens.load().refresh_token.get_secret_value() == expected_refresh
         assert store.load().mobile_binding == "binding"
