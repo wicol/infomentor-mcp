@@ -3,11 +3,6 @@
 A local, read-only [MCP](https://modelcontextprotocol.io) server for Swedish
 InfoMentor guardian accounts, authenticated with Stockholm BankID.
 
-**The point:** one request returns news from every linked child, merged into a
-single list instead of switching accounts and scrolling per child. Everything
-runs on your machine — there is no hosted intermediary, no account sharing, and
-no write access to school data.
-
 > Unofficial project. Not affiliated with InfoMentor, Stockholm stad, or BankID.
 
 ## What it does
