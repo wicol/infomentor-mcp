@@ -11,6 +11,8 @@ InfoMentor guardian accounts, authenticated with Stockholm BankID.
   across all of them.
 - Reads notifications with independent state per child, and calendar events
   within a chosen date range; shared items are deduplicated.
+- Reads each child's submitted childcare schedule (Fritidsschema), including
+  registered times, leave and care opening hours.
 - Extracts PDF/DOCX news attachment text inline, optionally in the same call
   as the news feed, without saving files to disk.
 - Keeps one verified session across restarts, in the OS keyring or a `0600`
@@ -101,6 +103,7 @@ link is sensitive; treat it like the QR. Approve the login yourself in BankID.
 | `auth_wait(login_id)` | Wait until the attempt ends; returns immediately if already finished. |
 | `get_attachments(child_id, news_id, attachment_id, attachment_mode)` | Read one discovered attachment as inline text. Separate calls may run in parallel. |
 | `get_calendar(start_date, end_date, child_ids?, offset, limit)` | Calendar events overlapping an inclusive Stockholm date range; earliest first. |
+| `get_childcare_schedule(start_date, end_date, child_ids?, offset, limit)` | Read Fritidsschema: each child's registered care times, leave and opening hours. |
 | `get_news(child_ids?, offset, limit, include_attachments, attachment_mode)` | Unique news for selected children, or all when omitted; optionally include attachment text. |
 | `get_notifications(child_ids?, offset, limit)` | Pupil-linked notifications, newest first, with independent state per child. |
 | `list_children()` | List linked children with stable IDs. |
@@ -134,6 +137,21 @@ The client restores pupil selection and sends only the calendar list request,
 not event-detail or notification-state-update requests. Live event retrieval is
 verified; preservation of unread notification states still needs an isolated
 check without another active InfoMentor client.
+
+### Childcare schedule (Fritidsschema)
+
+`get_childcare_schedule` reads submitted before/after-school and holiday care
+times, not lesson timetables or actual attendance. Dates are `YYYY-MM-DD`, both
+inclusive, for at most 31 calendar days. Omit `child_ids` for all linked children
+or pass `[]` for none. Results are sorted by date and child ID before pagination;
+each child/day stays separate even if times or registration IDs match.
+
+Each record includes `date`, `child_id`, `registration_id`, `starts_at`,
+`ends_at`, `opens_at`, `closes_at`, `on_leave` and `is_closed`, with times in
+`Europe/Stockholm`. Missing rows/times do not establish leave or no care need.
+The client requests exact weeks with automatic next-week fallback disabled and
+restores the original child selection. Comments are not opened; only their
+presence/unread flags are returned. No schedule or absence writes are exposed.
 
 ### Notifications
 
@@ -225,8 +243,8 @@ persisting credentials; it cannot undo an upstream grant or rotation.
 
 ## Limitations
 
-- Version 0.1.0, beta. News, notifications, calendar and child listing are implemented; school-data
-  operations stay read-only by design.
+- Version 0.1.0, beta. News, notifications, calendar, childcare schedules and child
+  listing are implemented; school-data operations stay read-only by design.
 - Child attribution is checked by selected pupil **name**, not by a verified
   pupil ID. Duplicate names or ignored switches fail closed.
 - Hub sessions are restored on demand, never by a background loop. The maximum

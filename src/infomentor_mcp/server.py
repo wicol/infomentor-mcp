@@ -20,7 +20,11 @@ from infomentor_mcp.auth.locking import SessionLockTimeout
 from infomentor_mcp.auth.mobile_pairing import MobileFlowError, MobilePairing
 from infomentor_mcp.auth.session import AuthSession, SessionStore
 from infomentor_mcp.client.http import AuthenticationExpiredError, InfoMentorError
-from infomentor_mcp.client.infomentor import MAX_CALENDAR_DAYS, InfoMentorClient
+from infomentor_mcp.client.infomentor import (
+    MAX_CALENDAR_DAYS,
+    MAX_CHILDCARE_DAYS,
+    InfoMentorClient,
+)
 from infomentor_mcp.login.attempt import LoginAttempt
 from infomentor_mcp.login.web_qr import WebQrOptions
 
@@ -214,6 +218,42 @@ def create_server(
 
         def fetch(client: InfoMentorClient) -> dict[str, Any]:
             items = client.get_calendar(start_date, end_date, child_ids)
+            return {
+                "items": items[offset : offset + limit], "offset": offset, "limit": limit,
+                "start_date": start_date.isoformat(), "end_date": end_date.isoformat(),
+                "timezone": "Europe/Stockholm",
+            }
+
+        return _with_client(store, factory, fetch)
+
+    @server.tool(
+        description=(
+            "Read Fritidsschema: submitted before/after-school and holiday childcare schedules, "
+            "not lesson timetables or actual attendance. start_date/end_date are YYYY-MM-DD, "
+            "inclusive, at most 31 calendar days. Select child_ids or omit for all; [] selects "
+            "none. Each child/day is separate, sorted by date then child_id before pagination. "
+            "Returns registered times, care opening/closing times, on_leave, is_closed and "
+            "comment-presence flags. Missing days/times do not prove leave or no care need. "
+            "Times use Europe/Stockholm. Disables automatic next-week fallback. Does not edit "
+            "schedules, register absence, open comments or mark them read."
+        ), annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False),
+    )
+    def get_childcare_schedule(
+        start_date: date, end_date: date, child_ids: list[str] | None = None,
+        offset: int = 0, limit: int = 100,
+    ) -> dict[str, Any]:
+        if not 0 <= (end_date - start_date).days < MAX_CHILDCARE_DAYS:
+            return {"error": {
+                "code": "invalid_date_range",
+                "message": "Use end_date >= start_date and at most 31 calendar days.",
+            }}
+        if offset < 0 or not 1 <= limit <= 100:
+            return {"error": {
+                "code": "invalid_pagination", "message": "Use offset >= 0 and limit 1-100."
+            }}
+
+        def fetch(client: InfoMentorClient) -> dict[str, Any]:
+            items = client.get_childcare_schedule(start_date, end_date, child_ids)
             return {
                 "items": items[offset : offset + limit], "offset": offset, "limit": limit,
                 "start_date": start_date.isoformat(), "end_date": end_date.isoformat(),

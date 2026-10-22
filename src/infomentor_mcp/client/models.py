@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from datetime import date as Date
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -75,4 +76,26 @@ class CalendarEntry(BaseModel):
     has_attachments: bool = False
     source_type: str = "calendar"
     source_reference: str = "/calendarv2/calendarv2/getentries"
+    retrieved_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class ChildcareDay(BaseModel):
+    """One child's submitted childcare schedule, not classroom lesson times."""
+
+    child_id: str
+    date: Date
+    registration_id: str | None = None
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+    opens_at: datetime | None = None
+    closes_at: datetime | None = None
+    on_leave: bool
+    is_closed: bool
+    closed_reason: str | None = None
+    is_locked: bool | None = None
+    has_comments: bool | None = None
+    has_unread_comments: bool | None = None
+    timezone: str = "Europe/Stockholm"
+    source_type: str = "childcare_schedule"
+    source_reference: str = "/TimeRegistration/TimeRegistration/GetTimeRegistrations/"
     retrieved_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

@@ -5,7 +5,7 @@ from __future__ import annotations
 import html
 import re
 import threading
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from urllib.parse import quote, urljoin, urlparse
 from zoneinfo import ZoneInfo
 
@@ -25,11 +25,19 @@ from infomentor_mcp.client.http import (
     InfoMentorError,
     InfoMentorHttpClient,
 )
-from infomentor_mcp.client.models import Attachment, CalendarEntry, Child, NewsItem, Notification
+from infomentor_mcp.client.models import (
+    Attachment,
+    CalendarEntry,
+    Child,
+    ChildcareDay,
+    NewsItem,
+    Notification,
+)
 
 _PUPIL_SWITCH_PATH = re.compile(r"/Account/PupilSwitcher/SwitchPupil/([^/?#'\"\\]+)", re.I)
 _SELECTED_PUPIL_NAME = re.compile(r"selectedPupilName\s*:\s*'((?:\\.|[^'])*)'", re.I)
 MAX_CALENDAR_DAYS = 366
+MAX_CHILDCARE_DAYS = 31
 
 
 class UnexpectedInfoMentorResponse(InfoMentorError):
@@ -201,6 +209,107 @@ class InfoMentorClient:
 
         return self._with_session_renewal(fetch)
 
+    def get_childcare_schedule(
+        self, start_date: date, end_date: date, child_ids: list[str] | None = None,
+    ) -> list[ChildcareDay]:
+        """Read submitted before/after-school and holiday care times, without editing."""
+        if not 0 <= (end_date - start_date).days < MAX_CHILDCARE_DAYS:
+            raise ValueError("Use end_date >= start_date and at most 31 calendar days.")
+        return self._with_session_renewal(
+            lambda: self._get_childcare_schedule(start_date, end_date, child_ids)
+        )
+
+    def _get_childcare_schedule(
+        self, start_date: date, end_date: date, child_ids: list[str] | None,
+    ) -> list[ChildcareDay]:
+        children = self._list_children()
+        selected = next((child for child in children if child.selected), None)
+        targets = (
+            [self._find_child(children, id_) for id_ in dict.fromkeys(child_ids)]
+            if child_ids is not None else children
+        )
+        linked_ids = {child.id for child in children}
+        items: dict[tuple[str, date], ChildcareDay] = {}
+        first_week = start_date - timedelta(days=start_date.weekday())
+        try:
+            for child in targets:
+                self._select_child(child.id, linked_ids)
+                week = first_week
+                while week <= end_date:
+                    response = self._http.hub_post(
+                        "/TimeRegistration/TimeRegistration/GetTimeRegistrations/", {
+                            "date": week.isoformat() + "T00:00:00.000Z",
+                            "showNextWeekIfNoMoreSchoolDays": False,
+                        },
+                    )
+                    try:
+                        payload = response.json()
+                        rows = payload["days"]
+                        week_start = _stockholm_datetime(payload["startDate"]).date()
+                        week_end = _stockholm_datetime(payload["endDate"]).date()
+                        if (
+                            not isinstance(rows, list) or week_start != week
+                            or not week <= week_end <= week + timedelta(days=6)
+                        ):
+                            raise ValueError("Unexpected week")
+                        for row in rows:
+                            day = self._parse_childcare_day(child.id, row)
+                            if not week_start <= day.date <= week_end:
+                                raise ValueError("Day outside returned week")
+                            if not start_date <= day.date <= end_date:
+                                continue
+                            key = (child.id, day.date)
+                            if key in items:
+                                raise ValueError("Duplicate childcare day")
+                            items[key] = day
+                    except (ValueError, KeyError, TypeError):
+                        raise UnexpectedInfoMentorResponse(
+                            "Childcare days were invalid or did not match the requested week."
+                        ) from None
+                    week += timedelta(days=7)
+            return sorted(items.values(), key=lambda item: (item.date, item.child_id))
+        finally:
+            if selected:
+                self._select_child(selected.id, linked_ids)
+
+    @staticmethod
+    def _parse_childcare_day(child_id: str, row: object) -> ChildcareDay:
+        try:
+            if not isinstance(row, dict) or not all(
+                isinstance(row.get(key), bool) for key in ("onLeave", "isSchoolClosed")
+            ):
+                raise ValueError("Missing childcare flags")
+            day = _stockholm_datetime(row["date"]).date()
+            times = {}
+            for source, target in (
+                ("startDateTime", "starts_at"), ("endDateTime", "ends_at"),
+                ("schoolOpeningTime", "opens_at"), ("schoolClosingTime", "closes_at"),
+            ):
+                value = row.get(source)
+                times[target] = None if value is None or value == "" else _stockholm_datetime(value)
+                if times[target] is not None and times[target].date() != day:
+                    raise ValueError("Time did not match childcare day")
+            for start, end in (("starts_at", "ends_at"), ("opens_at", "closes_at")):
+                if (
+                    times[start] and times[end]
+                    and times[end].timestamp() < times[start].timestamp()
+                ):
+                    raise ValueError("Reversed childcare times")
+            id_ = row.get("timeRegistrationId")
+            if isinstance(id_, bool) or id_ is not None and not isinstance(id_, (str, int)):
+                raise ValueError("Invalid registration ID")
+            return ChildcareDay(
+                child_id=child_id, date=day, registration_id=str(id_) if id_ is not None else None,
+                **times, on_leave=row["onLeave"], is_closed=row["isSchoolClosed"],
+                closed_reason=_string_or_none(row.get("schoolClosedReason")),
+                is_locked=row.get("isLocked"), has_comments=row.get("hasComments"),
+                has_unread_comments=row.get("hasUnreadComments"),
+            )
+        except (ValueError, TypeError, KeyError):
+            raise UnexpectedInfoMentorResponse(
+                "Childcare day had invalid dates, times or flags; values withheld."
+            ) from None
+
     def get_calendar(
         self, start_date: date, end_date: date, child_ids: list[str] | None = None,
     ) -> list[CalendarEntry]:
@@ -259,14 +368,8 @@ class InfoMentorClient:
                 raise ValueError("Missing identity")
             if not isinstance(row["isAllDayEvent"], bool):
                 raise ValueError("Missing all-day flag")
-            timezone = ZoneInfo("Europe/Stockholm")
-            start = datetime.fromisoformat(row["startDateFull"])
-            end = datetime.fromisoformat(row["endDateFull"])
-            start = (
-                start.replace(tzinfo=timezone)
-                if start.tzinfo is None else start.astimezone(timezone)
-            )
-            end = end.replace(tzinfo=timezone) if end.tzinfo is None else end.astimezone(timezone)
+            start = _stockholm_datetime(row["startDateFull"])
+            end = _stockholm_datetime(row["endDateFull"])
             if end.timestamp() < start.timestamp():
                 raise ValueError("Reversed event dates")
             return CalendarEntry(
@@ -573,3 +676,12 @@ class InfoMentorClient:
 
 def _string_or_none(value: object) -> str | None:
     return value if isinstance(value, str) else None
+
+
+def _stockholm_datetime(value: object) -> datetime:
+    """Interpret verified Hub wall-clock timestamps in Stockholm, preserving aware instants."""
+    if not isinstance(value, str):
+        raise ValueError("Expected an ISO timestamp")
+    parsed = datetime.fromisoformat(value)
+    timezone = ZoneInfo("Europe/Stockholm")
+    return parsed.replace(tzinfo=timezone) if parsed.tzinfo is None else parsed.astimezone(timezone)
