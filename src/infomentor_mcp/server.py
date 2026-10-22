@@ -7,6 +7,7 @@ import logging
 import threading
 from collections.abc import Callable
 from contextlib import asynccontextmanager
+from datetime import date
 from typing import Any, Literal
 
 import httpx
@@ -19,7 +20,7 @@ from infomentor_mcp.auth.locking import SessionLockTimeout
 from infomentor_mcp.auth.mobile_pairing import MobileFlowError, MobilePairing
 from infomentor_mcp.auth.session import AuthSession, SessionStore
 from infomentor_mcp.client.http import AuthenticationExpiredError, InfoMentorError
-from infomentor_mcp.client.infomentor import InfoMentorClient
+from infomentor_mcp.client.infomentor import MAX_CALENDAR_DAYS, InfoMentorClient
 from infomentor_mcp.login.attempt import LoginAttempt
 from infomentor_mcp.login.web_qr import WebQrOptions
 
@@ -192,6 +193,40 @@ def create_server(
                 child_ids, offset=offset, limit=limit, include_attachments=include_attachments
             )
             return {"items": items, "offset": offset, "limit": limit}
+
+        return _with_client(store, factory, fetch)
+
+    @server.tool(
+        description=(
+            "Read Hub calendar events overlapping start_date through end_date (YYYY-MM-DD, "
+            "both inclusive, Europe/Stockholm). Maximum 366 calendar days. Select child_ids or "
+            "omit for all linked children; [] selects none. Shared event IDs are merged and "
+            "events sorted by start time, earliest first, before pagination. Returns all-day "
+            "flags and timezone-aware times. Does not open event details, update notification "
+            "states, or retrieve calendar attachments."
+        ), annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False),
+    )
+    def get_calendar(
+        start_date: date, end_date: date, child_ids: list[str] | None = None,
+        offset: int = 0, limit: int = 50,
+    ) -> dict[str, Any]:
+        if not 0 <= (end_date - start_date).days < MAX_CALENDAR_DAYS:
+            return {"error": {
+                "code": "invalid_date_range",
+                "message": "Use end_date >= start_date and at most 366 calendar days.",
+            }}
+        if offset < 0 or not 1 <= limit <= 100:
+            return {"error": {
+                "code": "invalid_pagination", "message": "Use offset >= 0 and limit 1-100."
+            }}
+
+        def fetch(client: InfoMentorClient) -> dict[str, Any]:
+            items = client.get_calendar(start_date, end_date, child_ids)
+            return {
+                "items": items[offset : offset + limit], "offset": offset, "limit": limit,
+                "start_date": start_date.isoformat(), "end_date": end_date.isoformat(),
+                "timezone": "Europe/Stockholm",
+            }
 
         return _with_client(store, factory, fetch)
 

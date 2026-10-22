@@ -59,3 +59,20 @@ class Notification(BaseModel):
     source_reference: str | None = None
     source_type: str = "notification"
     retrieved_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class CalendarEntry(BaseModel):
+    """A Hub calendar event with local times resolved in the Stockholm timezone."""
+
+    id: str
+    child_ids: list[str]
+    title: str | None = None
+    description: str | None = None
+    starts_at: datetime
+    ends_at: datetime
+    all_day: bool
+    timezone: str = "Europe/Stockholm"
+    has_attachments: bool = False
+    source_type: str = "calendar"
+    source_reference: str = "/calendarv2/calendarv2/getentries"
+    retrieved_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

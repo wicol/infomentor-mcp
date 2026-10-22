@@ -106,6 +106,7 @@ explicit step after login.
 | `auth_status()` | Stored-session and pairing metadata, or active login status. |
 | `auth_wait(login_id)` | Wait until the attempt ends; returns immediately if already finished. |
 | `get_attachments(child_id, news_id, attachment_id, attachment_mode)` | Read one discovered attachment as inline text. Separate calls may run in parallel. |
+| `get_calendar(start_date, end_date, child_ids?, offset, limit)` | Calendar events overlapping an inclusive Stockholm date range; earliest first. |
 | `get_news(child_ids?, offset, limit, include_attachments, attachment_mode)` | Unique news for selected children, or all when omitted; optionally include attachment text. |
 | `get_notifications(child_ids?, offset, limit)` | Pupil-linked notifications, newest first, with independent state per child. |
 | `list_children()` | List linked children with stable IDs. |
@@ -119,6 +120,25 @@ for every requested child who received the post. Pagination applies after
 deduplication and sorting, so `limit=10` means ten unique news items. Pass a
 one-element `child_ids` list for a single child; an empty list selects none.
 This replaces the earlier singular `child_id` argument and response field.
+
+### Calendar
+
+`get_calendar` takes `start_date` and `end_date` as `YYYY-MM-DD`, both inclusive,
+for at most 366 calendar days. It includes events overlapping that interval,
+including multi-day events starting earlier. Select `child_ids`, omit for all
+linked children, or pass `[]` for none. Shared server event IDs are merged and
+sorted by start time, earliest first, before pagination.
+
+`starts_at` and `ends_at` include timezone offsets. Hub's local timestamps are
+interpreted in `Europe/Stockholm`, including daylight-saving time; `all_day`
+identifies whole-day events. End times retain Hub's value (all-day events were
+observed ending at 23:59:59, not at an exclusive next-day boundary).
+`has_attachments` is metadata only; calendar attachments are not fetched yet.
+
+The client restores pupil selection and sends only the calendar list request,
+not event-detail or notification-state-update requests. Live event retrieval is
+verified; preservation of unread notification states still needs an isolated
+check without another active InfoMentor client.
 
 ### Notifications
 
@@ -191,7 +211,7 @@ and limits.
 
 ## Limitations
 
-- Version 0.1.0, beta. News, notifications and child listing are implemented; school-data
+- Version 0.1.0, beta. News, notifications, calendar and child listing are implemented; school-data
   operations stay read-only by design.
 - Child attribution is checked by selected pupil **name**, not by a verified
   pupil ID. Duplicate names or ignored switches fail closed.

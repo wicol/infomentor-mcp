@@ -5,7 +5,9 @@ from __future__ import annotations
 import html
 import re
 import threading
+from datetime import date, datetime
 from urllib.parse import quote, urljoin, urlparse
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -23,10 +25,11 @@ from infomentor_mcp.client.http import (
     InfoMentorError,
     InfoMentorHttpClient,
 )
-from infomentor_mcp.client.models import Attachment, Child, NewsItem, Notification
+from infomentor_mcp.client.models import Attachment, CalendarEntry, Child, NewsItem, Notification
 
 _PUPIL_SWITCH_PATH = re.compile(r"/Account/PupilSwitcher/SwitchPupil/([^/?#'\"\\]+)", re.I)
 _SELECTED_PUPIL_NAME = re.compile(r"selectedPupilName\s*:\s*'((?:\\.|[^'])*)'", re.I)
+MAX_CALENDAR_DAYS = 366
 
 
 class UnexpectedInfoMentorResponse(InfoMentorError):
@@ -197,6 +200,87 @@ class InfoMentorClient:
                     self._select_child(self._original_child_id, set(self._expected_names))
 
         return self._with_session_renewal(fetch)
+
+    def get_calendar(
+        self, start_date: date, end_date: date, child_ids: list[str] | None = None,
+    ) -> list[CalendarEntry]:
+        """Get events overlapping an inclusive Stockholm date range for linked children."""
+        if not 0 <= (end_date - start_date).days < MAX_CALENDAR_DAYS:
+            raise ValueError("Use end_date >= start_date and at most 366 calendar days.")
+        return self._with_session_renewal(
+            lambda: self._get_calendar(start_date, end_date, child_ids)
+        )
+
+    def _get_calendar(
+        self, start_date: date, end_date: date, child_ids: list[str] | None,
+    ) -> list[CalendarEntry]:
+        children = self._list_children()
+        selected = next((child for child in children if child.selected), None)
+        targets = (
+            [self._find_child(children, id_) for id_ in dict.fromkeys(child_ids)]
+            if child_ids is not None else children
+        )
+        linked_ids = {child.id for child in children}
+        items: dict[str, CalendarEntry] = {}
+        try:
+            for child in targets:
+                self._select_child(child.id, linked_ids)
+                response = self._http.hub_post("/calendarv2/calendarv2/getentries", {
+                    "startDate": start_date.isoformat(), "endDate": end_date.isoformat(),
+                })
+                try:
+                    rows = response.json()
+                    if not isinstance(rows, list):
+                        raise ValueError("Not a list")
+                except ValueError:
+                    raise UnexpectedInfoMentorResponse(
+                        "Calendar response did not contain an event list."
+                    ) from None
+                for row in rows:
+                    entry = self._parse_calendar_entry(child.id, row)
+                    if entry.starts_at.date() > end_date or entry.ends_at.date() < start_date:
+                        continue
+                    if entry.id not in items:
+                        items[entry.id] = entry
+                    elif child.id not in items[entry.id].child_ids:
+                        items[entry.id].child_ids.append(child.id)
+            return sorted(items.values(), key=lambda item: (item.starts_at, item.id))
+        finally:
+            if selected:
+                self._select_child(selected.id, linked_ids)
+
+    @staticmethod
+    def _parse_calendar_entry(child_id: str, row: object) -> CalendarEntry:
+        try:
+            if not isinstance(row, dict):
+                raise ValueError("Not an event")
+            id_ = row["id"]
+            if isinstance(id_, bool) or not isinstance(id_, (int, str)) or not str(id_).strip():
+                raise ValueError("Missing identity")
+            if not isinstance(row["isAllDayEvent"], bool):
+                raise ValueError("Missing all-day flag")
+            timezone = ZoneInfo("Europe/Stockholm")
+            start = datetime.fromisoformat(row["startDateFull"])
+            end = datetime.fromisoformat(row["endDateFull"])
+            start = (
+                start.replace(tzinfo=timezone)
+                if start.tzinfo is None else start.astimezone(timezone)
+            )
+            end = end.replace(tzinfo=timezone) if end.tzinfo is None else end.astimezone(timezone)
+            if end.timestamp() < start.timestamp():
+                raise ValueError("Reversed event dates")
+            return CalendarEntry(
+                id=str(id_), child_ids=[child_id], title=_string_or_none(row.get("title")),
+                description=(
+                    _string_or_none(row.get("text")) or _string_or_none(row.get("description"))
+                ),
+                starts_at=start, ends_at=end, all_day=row["isAllDayEvent"],
+                has_attachments=row.get("hasAttachments") is True,
+            )
+        except (ValueError, TypeError, KeyError):
+            raise UnexpectedInfoMentorResponse(
+                "Calendar event had an invalid identity, date or all-day flag; values withheld."
+            ) from None
 
     def get_notifications(self, child_ids: list[str] | None = None) -> list[Notification]:
         """Read pupil-linked notifications without marking them seen/read or following links."""

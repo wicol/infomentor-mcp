@@ -1,11 +1,13 @@
 import asyncio
 from contextlib import nullcontext
+from datetime import datetime
 
 import httpx
+import pytest
 
 from infomentor_mcp.auth.session import AuthSession
 from infomentor_mcp.client.http import AuthenticationExpiredError
-from infomentor_mcp.client.models import Child, NewsItem, Notification
+from infomentor_mcp.client.models import CalendarEntry, Child, NewsItem, Notification
 from infomentor_mcp.server import create_server
 
 
@@ -35,6 +37,15 @@ class FakeClient:
             id=str(index), child_ids=child_ids or ["child-1"], states={"child-1": "New"}
         ) for index in range(3)]
 
+    def get_calendar(self, start_date, end_date, child_ids):
+        assert start_date.isoformat() == "2026-10-22"
+        assert end_date.isoformat() == "2026-10-30"
+        return [CalendarEntry(
+            id=str(index), child_ids=child_ids or ["child-1"], all_day=False,
+            starts_at=datetime.fromisoformat("2026-10-22T10:00:00+02:00"),
+            ends_at=datetime.fromisoformat("2026-10-22T11:00:00+02:00"),
+        ) for index in range(3)]
+
     def get_news(self, child_ids: list[str] | None, *, offset=0, limit=None,
                  include_attachments=False) -> list[NewsItem]:
         items = [
@@ -57,7 +68,8 @@ def test_server_registers_only_verified_data_tools() -> None:
 
     assert {tool.name for tool in tools} == {
         "auth_status", "auth_start", "auth_progress", "auth_cancel", "auth_pair", "auth_revoke",
-        "auth_wait", "get_news", "get_attachments", "get_notifications", "list_children",
+        "auth_wait", "get_news", "get_attachments", "get_calendar", "get_notifications",
+        "list_children",
     }
 
 
@@ -92,6 +104,24 @@ def test_notifications_tool_paginates_and_is_read_only():
         assert tool.annotations.read_only_hint
 
     asyncio.run(scenario())
+
+
+def test_calendar_tool_validates_dates_and_paginates():
+    server = create_server(MemorySessionStore(AuthSession()), FakeClient)
+    result = asyncio.run(server.call_tool("get_calendar", {
+        "start_date": "2026-10-22", "end_date": "2026-10-30", "offset": 1, "limit": 1,
+    }))
+    assert [item["id"] for item in result.structured_content["items"]] == ["1"]
+    assert result.structured_content["timezone"] == "Europe/Stockholm"
+
+
+@pytest.mark.parametrize("end", ["2026-10-21", "2027-10-23"])
+def test_calendar_invalid_range_is_rejected_before_auth(end):
+    server = create_server(MemorySessionStore(None), FakeClient)
+    result = asyncio.run(server.call_tool("get_calendar", {
+        "start_date": "2026-10-22", "end_date": end,
+    }))
+    assert result.structured_content["error"]["code"] == "invalid_date_range"
 
 
 def test_rejected_mobile_authorization_is_reported_as_auth_required():
