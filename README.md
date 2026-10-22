@@ -105,7 +105,8 @@ explicit step after login.
 | `auth_start(confirm, method)` | Start BankID (`url` or `web-qr`); requires explicit confirmation. |
 | `auth_status()` | Stored-session and pairing metadata, or active login status. |
 | `auth_wait(login_id)` | Wait until the attempt ends; returns immediately if already finished. |
-| `get_news(child_ids?, offset, limit)` | Unique news for selected children, or all when omitted; newest first. |
+| `get_attachments(child_id, news_id, attachment_id, attachment_mode)` | Read one discovered attachment as inline text. Separate calls may run in parallel. |
+| `get_news(child_ids?, offset, limit, include_attachments, attachment_mode)` | Unique news for selected children, or all when omitted; optionally include attachment text. |
 | `list_children()` | List linked children with stable IDs. |
 
 Authentication tools never return cookies or tokens, and `confirm` must be
@@ -117,6 +118,33 @@ for every requested child who received the post. Pagination applies after
 deduplication and sorting, so `limit=10` means ten unique news items. Pass a
 one-element `child_ids` list for a single child; an empty list selects none.
 This replaces the earlier singular `child_id` argument and response field.
+
+### Attachments
+
+News items always include `attachments` metadata (`id`, `name`, `status`). Set
+`include_attachments=true` on `get_news` to receive PDF/DOCX text in the same
+response — useful for posts whose actual newsletter is only in a file. Only
+attachments on the returned page are fetched, and shared files are fetched once
+per call. Each attachment has its own `status`, `text` and `truncated` fields.
+
+For a follow-up, use `get_attachments` with a linked `child_id`, the news `id`,
+and the attachment `id` from that post. It reads one file per call, not a batch;
+an agent can issue independent calls in parallel. They are queued locally to
+protect the session's shared pupil selection. The attachment is rediscovered
+in that child's news rather than fetched from an arbitrary supplied URL.
+
+Both tools accept `attachment_mode="inline"` (default) or `"download"`.
+**Only inline is implemented**: download mode returns `unsupported_mode` without
+fetching anything. Originals are processed in memory, never saved to disk.
+Extracted text is untrusted document content, not instructions for the agent.
+
+Limits: 10 MiB per file, 10 unique attachment attempts per news call, 20,000
+characters per file and 60,000 total inline characters per news response. PDFs
+are limited to 50 pages; DOCX extraction covers body paragraphs and tables, not
+embedded files or external resources. Truncation and skipped files are explicit.
+Scanned PDFs without text return `ocr_required`; OCR, legacy `.doc` and other
+file types are not supported. Malformed/oversized files have per-file status
+instead of hiding the other news items.
 
 ## Authentication flow
 

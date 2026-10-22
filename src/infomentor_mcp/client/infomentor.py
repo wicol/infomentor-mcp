@@ -7,14 +7,23 @@ import re
 import threading
 from urllib.parse import quote, urljoin, urlparse
 
+import httpx
+
 from infomentor_mcp.auth.session import AuthSession, SessionStore
+from infomentor_mcp.client.attachments import (
+    MAX_ATTACHMENTS,
+    MAX_FILE_BYTES,
+    MAX_TOTAL_TEXT_CHARS,
+    extract_text,
+    parse_attachments,
+)
 from infomentor_mcp.client.http import (
     HUB_ORIGIN,
     AuthenticationExpiredError,
     InfoMentorError,
     InfoMentorHttpClient,
 )
-from infomentor_mcp.client.models import Child, NewsItem
+from infomentor_mcp.client.models import Attachment, Child, NewsItem
 
 _PUPIL_SWITCH_PATH = re.compile(r"/Account/PupilSwitcher/SwitchPupil/([^/?#'\"\\]+)", re.I)
 _SELECTED_PUPIL_NAME = re.compile(r"selectedPupilName\s*:\s*'((?:\\.|[^'])*)'", re.I)
@@ -108,11 +117,19 @@ class InfoMentorClient:
                 self._select_child(original_id, child_id_set)
         return children
 
-    def get_news(self, child_ids: list[str] | None = None) -> list[NewsItem]:
+    def get_news(
+        self, child_ids: list[str] | None = None, *, offset: int = 0, limit: int | None = None,
+        include_attachments: bool = False,
+    ) -> list[NewsItem]:
         """Get unique news, newest first, for selected children or all linked children."""
-        return self._with_session_renewal(lambda: self._get_news(child_ids))
+        return self._with_session_renewal(
+            lambda: self._get_news(child_ids, offset, limit, include_attachments)
+        )
 
-    def _get_news(self, child_ids: list[str] | None) -> list[NewsItem]:
+    def _get_news(
+        self, child_ids: list[str] | None, offset: int = 0, limit: int | None = None,
+        include_attachments: bool = False,
+    ) -> list[NewsItem]:
         children = self._list_children()
         selected = next((child for child in children if child.selected), None)
         targets = (
@@ -129,10 +146,86 @@ class InfoMentorClient:
                         items[item.id] = item
                     elif child.id not in items[item.id].child_ids:
                         items[item.id].child_ids.append(child.id)
+            page = sorted(items.values(), key=lambda item: item.published_at or "", reverse=True)
+            page = page[offset : offset + limit if limit is not None else None]
+            if include_attachments:
+                cache: dict[str, Attachment] = {}
+                remaining = MAX_TOTAL_TEXT_CHARS
+                for item in page:
+                    if not item.attachments:
+                        continue
+                    self._select_child(item.child_ids[0], child_id_set)
+                    for index, attachment in enumerate(item.attachments):
+                        if attachment.status != "available":
+                            continue
+                        if remaining <= 0:
+                            result = attachment.model_copy(update={"status": "limit_reached"})
+                        elif attachment.id in cache:
+                            result = cache[attachment.id].model_copy(
+                                deep=True, update={"name": attachment.name}
+                            )
+                        elif len(cache) >= MAX_ATTACHMENTS:
+                            result = attachment.model_copy(update={"status": "limit_reached"})
+                        else:
+                            result = self._read_attachment(item.id, attachment)
+                            cache[attachment.id] = result.model_copy(deep=True)
+                        if result.text:
+                            result.truncated |= len(result.text) > remaining
+                            result.text = result.text[:remaining]
+                            remaining -= len(result.text)
+                        item.attachments[index] = result
+            return page
         finally:
             if selected:
                 self._select_child(selected.id, child_id_set)
-        return sorted(items.values(), key=lambda item: item.published_at or "", reverse=True)
+
+    def get_attachments(self, child_id: str, news_id: str, attachment_id: str) -> Attachment:
+        """Read one attachment rediscovered in a linked child's current news feed."""
+        def fetch():
+            items = self._get_news([child_id])
+            item = next((item for item in items if item.id == news_id), None)
+            attachment = (
+                next((a for a in item.attachments if a.id == attachment_id), None) if item else None
+            )
+            if attachment is None or attachment.status != "available":
+                raise InfoMentorError("Attachment was not found in the requested child's news.")
+            try:
+                self._select_child(child_id, set(self._expected_names))
+                return self._read_attachment(news_id, attachment)
+            finally:
+                if self._original_child_id:
+                    self._select_child(self._original_child_id, set(self._expected_names))
+
+        return self._with_session_renewal(fetch)
+
+    def _read_attachment(self, news_id: str, attachment: Attachment) -> Attachment:
+        result = attachment.model_copy(deep=True)
+        if not (result.name or "").lower().endswith((".pdf", ".docx")):
+            result.status = "unsupported_type"
+            return result
+        # Construct the URL from rediscovered IDs, never accept a caller-supplied URL.
+        path = f"/Resources/Resource/Download/{result.id}"
+        try:
+            with self._http.client.stream(
+                "GET", HUB_ORIGIN + path,
+                params={"api": "IM2", "ModuleType": "NewsItem", "ConnectionId": news_id},
+            ) as response:
+                if response.status_code == 401 or response.is_redirect:
+                    raise AuthenticationExpiredError("Attachment request requires authentication.")
+                response.raise_for_status()
+                if int(response.headers.get("content-length", "0")) > MAX_FILE_BYTES:
+                    result.status = "too_large"
+                    return result
+                content = bytearray()
+                for chunk in response.iter_bytes(chunk_size=65536):
+                    content.extend(chunk)
+                    if len(content) > MAX_FILE_BYTES:
+                        result.status = "too_large"
+                        return result
+            return extract_text(result, bytes(content))
+        except (httpx.HTTPError, ValueError):
+            result.status = "fetch_failed"
+            return result
 
     def _with_session_renewal(self, operation):
         process_lock = self._lock_store.locked()
@@ -309,6 +402,7 @@ class InfoMentorClient:
             content=_string_or_none(item.get("content")),
             published_at=_string_or_none(item.get("publishedDate")),
             source_reference=f"/#/communication/news/{item_id}",
+            attachments=parse_attachments(item_id, item.get("attachments")),
             raw=item,
         )
 

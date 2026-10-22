@@ -22,10 +22,12 @@ classifiers = [
   "Topic :: Education",
 ]
 dependencies = [
+  "defusedxml>=0.7,<1",
   "httpx>=0.28,<1",
   "keyring>=25,<27",
   "mcp>=2,<3",
   "pydantic>=2.10,<3",
+  "pypdf>=6,<7",
   "qrcode>=8,<9",
 ]
 

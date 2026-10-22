@@ -18,6 +18,16 @@ class Child(BaseModel):
     retrieved_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
+class Attachment(BaseModel):
+    """A discovered news attachment and, when requested, its inline text."""
+
+    id: str | None
+    name: str | None = None
+    status: str = "available"
+    text: str | None = None
+    truncated: bool = False
+
+
 class NewsItem(BaseModel):
     """A school-news item, retaining its original API payload for completeness."""
 
@@ -29,4 +39,5 @@ class NewsItem(BaseModel):
     source_type: str = "news"
     source_reference: str
     retrieved_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    attachments: list[Attachment] = Field(default_factory=list)
     raw: dict[str, Any]

@@ -30,8 +30,9 @@ class FakeClient:
     def list_children(self) -> list[Child]:
         return [Child(id="child-1", name="Synthetic Child", selected=True)]
 
-    def get_news(self, child_ids: list[str] | None) -> list[NewsItem]:
-        return [
+    def get_news(self, child_ids: list[str] | None, *, offset=0, limit=None,
+                 include_attachments=False) -> list[NewsItem]:
+        items = [
             NewsItem(
                 id=f"news-{index}",
                 child_ids=child_ids if child_ids is not None else ["child-1"],
@@ -41,6 +42,7 @@ class FakeClient:
             )
             for index in range(1, 4)
         ]
+        return items[offset : offset + limit if limit is not None else None]
 
 
 def test_server_registers_only_verified_data_tools() -> None:
@@ -50,7 +52,7 @@ def test_server_registers_only_verified_data_tools() -> None:
 
     assert {tool.name for tool in tools} == {
         "auth_status", "auth_start", "auth_progress", "auth_cancel", "auth_pair", "auth_revoke",
-        "auth_wait", "get_news", "list_children",
+        "auth_wait", "get_news", "get_attachments", "list_children",
     }
 
 
