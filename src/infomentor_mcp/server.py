@@ -229,6 +229,11 @@ def create_server(
             "per child. Sorted by Hub order_date (falling back to sent_at), newest first, before "
             "pagination. Does not mark notifications seen/read/cleared, open their destinations, "
             "or retrieve messages referenced by them."
+            " Notifications point to content, not additional news/events: notification id is "
+            "distinct from the target ID in source_reference (news/<id>, eventId=<id>, "
+            "uolv2/show/<id>). app_type/notification_type identify the kind of content/change. "
+            "Multiple notifications may reference one target; use these references to avoid "
+            "double-counting content already returned by news/calendar tools."
         ), annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False),
     )
     def get_notifications(
