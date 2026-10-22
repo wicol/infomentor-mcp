@@ -25,8 +25,10 @@ upstream request, cover both the success shape and a failure/no-auth shape.
   screenshots.
 - **No real personal data.** Anonymize names, schools, class lists, and any
   copied news content. Use synthetic fixtures.
-- **Explicit consent.** Authentication and mobile pairing must stay
-  user-initiated and confirmation-gated; never start BankID automatically.
+- **Explicit intent.** Login is user-initiated and includes persistent mobile
+  setup; there is no separate pairing prompt or `auth_start` confirmation flag.
+  Never start BankID or create a new grant because a read failed. Explicit
+  revocation retains its confirmation gate.
 - **Small, focused changes.** Keep the existing layering: protocol, persistence,
   presentation, and MCP tools separate.
 

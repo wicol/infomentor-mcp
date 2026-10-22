@@ -80,20 +80,20 @@ def create_server(
 
     @server.tool(
         description=(
-            "Start BankID only at the user's explicit request (confirm=true). "
+            "At the user's request, log in with BankID and automatically set up persistent "
+            "mobile authorization for session renewal. Existing credentials are scope-checked "
+            "and safely revoked before replacement; old grants are never rebound. "
             "url opens BankID on the phone; web-qr returns an animated QR page for another screen. "
             "The returned short-lived link is sensitive and may enter the AI host's history. "
             "Returns before approval. Show the link to the user, then call auth_wait to receive "
             "the outcome immediately when finished; auth_progress is a nonblocking alternative. "
-            "Does not pair a mobile client."
+            "complete means verified mobile access is bound; partial means only web login worked."
         ), annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False),
     )
     async def auth_start(
-        confirm: bool, method: Literal["url", "web-qr"] = "url"
+        method: Literal["url", "web-qr"] = "url"
     ) -> dict[str, Any]:
         nonlocal attempt
-        if not confirm:
-            return {"error": {"code": "confirmation_required", "message": "Ask the user first."}}
         if attempt is not None and attempt.running:
             return {"error": {"code": "session_busy", "message": "A login is already in progress."}}
         attempt = LoginAttempt(store, method, web_options or WebQrOptions())
@@ -111,7 +111,7 @@ def create_server(
         description=(
             "After showing the login link to the user, wait asynchronously for completion, "
             "failure or cancellation. Returns immediately if already finished, otherwise as soon "
-            "as the attempt ends (at most its remaining five-minute lifetime). No polling or "
+            "as the attempt ends, including automatic mobile setup after BankID. No polling or "
             "new login. Cancelling this wait does not cancel BankID; use auth_cancel for that. "
             "Never returns login links, QR payloads or tokens."
         )
@@ -128,6 +128,8 @@ def create_server(
     @server.tool(
         description=(
             "Cancel local login polling and close its web QR page. "
+            "If mobile setup has started, wait for safe credential persistence; the login may "
+            "finish complete instead of cancelled. "
             "The upstream BankID order may remain until expiry; this does not revoke tokens."
         ), annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False),
     )
@@ -138,22 +140,12 @@ def create_server(
 
     @server.tool(
         description=(
-            "With explicit user approval (confirm=true), create long-lived mobile authorization "
-            "after BankID. Stores tokens privately, never returns them. "
-            "Refuses to overwrite pairing."
-        ), annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False),
-    )
-    def auth_pair(confirm: bool) -> dict[str, Any]:
-        return _mobile_action(store, "pair", confirm)
-
-    @server.tool(
-        description=(
             "With explicit user approval (confirm=true), revoke the saved mobile refresh "
             "credential and remove it locally after confirming rejection."
         ), annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True),
     )
     def auth_revoke(confirm: bool) -> dict[str, Any]:
-        return _mobile_action(store, "revoke", confirm)
+        return _revoke_mobile(store, confirm)
 
     @server.tool(description="List children linked to the authenticated guardian account.")
     def list_children() -> dict[str, Any]:
@@ -345,18 +337,15 @@ def _serialize(value: Any) -> Any:
     return value
 
 
-def _mobile_action(store: SessionStore, action: str, confirm: bool) -> dict[str, Any]:
+def _revoke_mobile(store: SessionStore, confirm: bool) -> dict[str, Any]:
     if not confirm:
         return {"error": {"code": "confirmation_required", "message": "Ask the user first."}}
     flow = None
     try:
         with store.locked(timeout=0):
             flow = MobilePairing(store)
-            if action == "pair":
-                flow.pair()
-            else:
-                flow.revoke()
-        return {"status": "paired" if action == "pair" else "refresh_credential_removed"}
+            flow.revoke()
+        return {"status": "refresh_credential_removed"}
     except SessionLockTimeout:
         return {"error": {"code": "session_busy", "message": "Session is busy; retry shortly."}}
     except MobileFlowError as error:

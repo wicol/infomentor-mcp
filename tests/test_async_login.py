@@ -1,13 +1,18 @@
 import asyncio
+import threading
 
 import httpx
 import pytest
 
 from infomentor_mcp.auth.locking import SessionLockTimeout
+from infomentor_mcp.auth.mobile_pairing import MobileFlowError
 from infomentor_mcp.auth.session import AuthSession, SessionStore
 from infomentor_mcp.auth.stockholm_bankid import BankIdOrder, BankIdStatus
 from infomentor_mcp.login.attempt import LoginAttempt
+from infomentor_mcp.login.complete import complete_mobile_login
 from infomentor_mcp.login.web_qr import WebQrOptions
+
+pytestmark = pytest.mark.usefixtures("completed_mobile_login")
 
 
 class FakeProtocol:
@@ -71,7 +76,8 @@ def test_approved_login_saves_only_after_verification():
         await asyncio.wait_for(attempt.task, 3)
         assert attempt.snapshot()["status"] == "complete"
         assert attempt.link is None
-        assert store.load().mobile_binding is None  # Explicit new login breaks old binding.
+        assert store.load().mobile_binding == "synthetic-bound-login"
+        assert attempt.snapshot()["mobile_session_bound"]
         assert protocol.closed
 
     asyncio.run(scenario())
@@ -154,5 +160,73 @@ def test_async_lock_contends_between_tasks_without_blocking_event_loop():
                 pass
         with store.locked(timeout=0):
             pass
+
+    asyncio.run(scenario())
+
+
+def test_mobile_setup_failure_returns_partial_without_exposing_secrets(monkeypatch):
+    def failed(_):
+        raise ValueError("secret-token")
+
+    monkeypatch.setattr("infomentor_mcp.auth.mobile_pairing.MobilePairing.complete_login", failed)
+
+    async def scenario():
+        store = SessionStore()
+        protocol = FakeProtocol()
+        attempt = LoginAttempt(store, "url", WebQrOptions(), protocol_factory=lambda: protocol)
+        await attempt.start()
+        protocol.approve.set()
+        await asyncio.wait_for(attempt.task, 3)
+        result = attempt.snapshot()
+        assert result["status"] == "partial"
+        assert result["web_session_stored"] and not result["mobile_session_bound"]
+        assert result["error_code"] == "mobile_authorization_failed"
+        assert store.load() is not None and store.load().mobile_binding is None
+        assert "secret" not in str(result)
+
+    asyncio.run(scenario())
+
+
+def test_wait_and_cancel_do_not_abandon_mobile_persistence(monkeypatch):
+    started, release = threading.Event(), threading.Event()
+
+    def finish(flow):
+        started.set()
+        assert release.wait(3)
+        session = flow.store.load()
+        session.mobile_binding = "completed-binding"
+        flow.store.save(session)
+
+    monkeypatch.setattr("infomentor_mcp.auth.mobile_pairing.MobilePairing.complete_login", finish)
+
+    async def scenario():
+        store = SessionStore()
+        protocol = FakeProtocol()
+        attempt = LoginAttempt(store, "url", WebQrOptions(), protocol_factory=lambda: protocol)
+        await attempt.start()
+        protocol.approve.set()
+        try:
+            assert await asyncio.to_thread(started.wait, 2)
+            assert attempt.snapshot()["status"] == "pairing" and not attempt.task.done()
+            cancelled = asyncio.create_task(attempt.cancel())
+            await asyncio.sleep(0)
+            release.set()
+            assert (await cancelled)["status"] == "complete"
+            assert store.load().mobile_binding == "completed-binding"
+        finally:
+            release.set()
+            await attempt.cancel()
+
+    asyncio.run(scenario())
+
+
+def test_mobile_setup_does_not_overwrite_a_newer_login():
+    async def scenario():
+        store = SessionStore()
+        newer = AuthSession(mobile_binding="newer-login")
+        store.save(newer)
+        with pytest.raises(MobileFlowError, match="Saved login changed"):
+            await complete_mobile_login(store, AuthSession())
+        assert store.load() == newer
 
     asyncio.run(scenario())

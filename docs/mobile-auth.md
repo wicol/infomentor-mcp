@@ -1,7 +1,8 @@
 # Experimental Hub mobile authentication
 
-This implementation uses the older **InfoMentor Hub** app protocol. Initial
-pairing and revocation are explicit, confirmation-gated CLI or MCP actions.
+This implementation uses the older **InfoMentor Hub** app protocol.
+Mobile setup is an automatic part of an explicitly requested CLI/MCP login;
+revocation remains a separate, confirmation-gated action.
 Existing bound credentials can restore an expired Hub session on demand through
 the normal MCP/client read path. It never registers push notifications,
 installs an APK, or modifies school records.
@@ -44,20 +45,23 @@ Independent static observations from Retrofit annotations and DEX call sites:
 
 ## Commands
 
-After an ordinary user-approved BankID web login:
+Normal CLI authentication includes mobile setup automatically:
 
 ```sh
-uv run infomentor-mcp auth mobile-discover
-uv run infomentor-mcp auth mobile-pair --confirm
+uv run infomentor-mcp auth login
 ```
 
-With an MCP client, the equivalent pairing action is `auth_pair(confirm=true)`
-after a successful BankID login. Revocation is `auth_revoke(confirm=true)`,
+With an MCP client, `auth_start(method)` starts BankID and automatic mobile
+setup; it has no `confirm` parameter. `auth_wait(login_id)` waits for both stages.
+There is no separate `auth_pair` tool or extra pairing confirmation.
+Revocation is `auth_revoke(confirm=true)`,
 equivalent to `auth mobile-revoke --confirm` below. Both require explicit user
-approval; neither runs automatically when a school-data read fails. The CLI
-discovery and test commands below are not separate MCP tools.
+approval for revocation. A school-data read never initiates BankID or a new
+mobile grant. `auth mobile-discover` and `auth mobile-pair --confirm` remain
+low-level CLI diagnostics/recovery commands, not steps needed after normal
+login. Discovery and test commands below are not separate MCP tools.
 
-Pairing explicitly creates a new app authorization. It generates its **own**
+When needed, login creates a new app authorization. It generates its **own**
 random UUID and an identifying `InfoMentor MCP` device name. It does not copy
 the user's Android device ID or app credentials. `DevicePlatform=Android`
 matches the inspected app protocol; the actual client runs locally in Python.
@@ -100,8 +104,14 @@ lifetime is inferred from access-token `expires_in`.
   children fingerprint before replacing the saved web session. This is a scope
   check, not proof of a unique guardian identity.
 - A random local binding links the mobile credential to its web-session lineage.
-  A different explicit web login or logout breaks that binding; mobile tests
-  refuse to overwrite such a session. Revocation remains possible independently.
+  A new BankID login initially saves an unbound web session, then verifies
+  matching linked-child scope before revoking/checking existing credentials
+  and issuing a new grant. Access may first be refreshed for revocation.
+  Old grants are never rebound: matching children do not prove guardian identity.
+  Mismatched scope or inconclusive failures retain credentials and return
+  `partial`, leaving the fresh web session usable but unbound. Mobile tests
+  still refuse to replace an unbound session. Logout breaks the binding;
+  revocation remains possible independently.
 - `auth logout` clears **web cookies only**. Use `mobile-revoke --confirm` to
   invalidate the refresh credential before discarding its local copy. It does
   not guarantee immediate invalidation of existing access tokens or Hub cookies,
@@ -155,3 +165,9 @@ verification and a real MCP stdio `get_news(limit=1)` call also succeeded.
 Synthetic tests cover the combined Hub/access-expiry path, stale-session
 overwrite protection, one-replay limits, error redaction, scope/binding checks,
 and refusal to refresh on access denials or rate limits.
+
+The combined BankID-plus-mobile login now replaces the former two-step MCP
+workflow. Its success, partial-failure, replacement and cancellation behaviour
+are tested with synthetic protocols. A new human-approved live login is still
+needed to verify this integrated orchestration; the live observations above
+establish the underlying mobile protocol, not this latest orchestration change.

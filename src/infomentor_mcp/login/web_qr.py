@@ -155,7 +155,8 @@ body{{font:18px system-ui;text-align:center;margin:2rem}} canvas{{width:min(90vw
 <p id="status">Startar…</p><script nonce="{nonce}">
 const canvas=document.querySelector('canvas'),ctx=canvas.getContext('2d');
 const labels={{starting:'Startar…',waiting:'Skanna QR-koden',user_sign:'Godkänn i BankID',
-verifying:'Verifierar inloggningen…',complete:'Inloggningen är sparad',
+verifying:'Verifierar inloggningen…',pairing:'Förbereder sessionsförnyelse…',
+complete:'Inloggningen är sparad',
 failed:'Inloggningen misslyckades',cancelled:'Inloggningen avbröts'}};
 async function tick(){{try{{
  const r=await fetch('frame',{{cache:'no-store'}}); if(!r.ok)throw new Error();

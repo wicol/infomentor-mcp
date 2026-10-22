@@ -14,7 +14,7 @@ from infomentor_mcp.auth.mobile_pairing import (
     MobilePairing,
 )
 from infomentor_mcp.auth.session import AuthSession, SessionStore
-from infomentor_mcp.client.http import HUB_ORIGIN
+from infomentor_mcp.client.http import HUB_ORIGIN, AuthenticationExpiredError
 
 PAGE = "<script>var pupils = ['/Account/PupilSwitcher/SwitchPupil/synthetic-child'];</script>"
 DISCOVERY = {
@@ -61,7 +61,7 @@ def test_pairing_persists_tokens_and_verifies_fresh_child_scope(httpx_mock):
     store = prepare_pairing(httpx_mock)
     flow = MobilePairing(store)
     try:
-        flow.pair()
+        flow.complete_login()
         credentials = flow.tokens.load()
         assert credentials.verified
         assert credentials.refresh_token.get_secret_value() == "synthetic-refresh"
@@ -77,6 +77,50 @@ def test_pairing_persists_tokens_and_verifies_fresh_child_scope(httpx_mock):
             "authorization" not in request.headers
             for request in requests if request.url.host != "api-im.infomentor.se"
         )
+    finally:
+        flow.close()
+
+
+@pytest.mark.parametrize("outcome,expected", [
+    ("valid", ["refresh", "revoke", "pair"]),
+    ("rejected", ["refresh", "revoke", "pair"]),
+    ("network", ["refresh"]),
+    ("different_scope", []),
+])
+def test_login_cleans_up_mobile_authorization_before_replacing(
+    monkeypatch, outcome, expected,
+):
+    store = SessionStore()
+    store.save(AuthSession())
+    flow = MobilePairing(store)
+    flow.tokens.save(MobileCredentials(
+        access_token="access", refresh_token="refresh", device_id="device",
+        binding="old-binding", children_fingerprint="scope",
+    ))
+    monkeypatch.setattr("infomentor_mcp.auth.mobile_pairing.InfoMentorHttpClient.verify_authenticated_read",
+                        lambda _: 200)
+    monkeypatch.setattr("infomentor_mcp.auth.mobile_pairing._children_fingerprint",
+                        lambda _: "different" if outcome == "different_scope" else "scope")
+    events = []
+
+    def refresh(*args, **kwargs):
+        events.append("refresh")
+        if outcome == "rejected":
+            raise AuthenticationExpiredError("Rejected", http_status=400)
+        if outcome == "network":
+            raise MobileFlowError("Network failed")
+
+    monkeypatch.setattr(flow, "_refresh", refresh)
+    monkeypatch.setattr(flow, "revoke", lambda: events.append("revoke"))
+    monkeypatch.setattr(flow, "pair", lambda: events.append("pair"))
+    try:
+        if outcome in {"network", "different_scope"}:
+            with pytest.raises(MobileFlowError):
+                flow.complete_login()
+        else:
+            flow.complete_login()
+        assert events == expected
+        assert flow.tokens.load().binding == "old-binding"  # No blind overwrite/clear.
     finally:
         flow.close()
 

@@ -1,8 +1,8 @@
 """Explicit Hub app authorization, refresh tests and revocation experiments.
 
 Only the Swedish discovery-verified origins are contacted. No push registration
-or school-record writes are performed. Pairing/revocation remain explicit CLI
-actions; renew() can restore an existing, bound pairing on demand through MCP.
+or school-record writes are performed. Explicit login includes mobile setup;
+renew() only restores an existing, bound authorization without creating a grant.
 """
 
 from __future__ import annotations
@@ -135,6 +135,41 @@ class MobilePairing:
 
     def close(self) -> None:
         self.transport.close()
+
+    def complete_login(self) -> None:
+        """Bind mobile access after an explicitly requested, fresh BankID login.
+
+        Never rebind an old grant: matching children do not prove guardian identity.
+        Existing credentials must pass revocation/cleanup before replacement.
+        The caller holds the session lock for this entire operation.
+        """
+        credentials = self.tokens.load()
+        if credentials is None:
+            self.pair()
+            return
+        session = self.store.load()
+        if session is None:
+            raise MobileFlowError("No verified web session is stored.")
+        web = InfoMentorHttpClient(session)
+        try:
+            web.verify_authenticated_read()
+            if _children_fingerprint(web) != credentials.children_fingerprint:
+                raise MobileFlowError(
+                    "Existing mobile authorization has a different child scope; retained. "
+                    "Revoke it explicitly before logging in to this account again."
+                )
+        finally:
+            web.close()
+        if not credentials.revocation_acknowledged:
+            try:
+                # Refresh only to obtain bearer access for revocation, never to
+                # transplant the old guardian's Hub session into the new login.
+                self._refresh(credentials)
+            except AuthenticationExpiredError as error:
+                if error.http_status not in {400, 401}:
+                    raise
+        self.revoke()
+        self.pair()
 
     def pair(self) -> None:
         if self.tokens.load() is not None:

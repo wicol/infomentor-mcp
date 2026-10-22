@@ -22,8 +22,8 @@ no write access to school data.
   file.
 - Logs in with BankID via terminal QR, an animated web QR page, or an app
   autostart link.
-- Optionally pairs a long-lived mobile authorization, so an expired Hub session
-  can be renewed on demand without a new BankID approval.
+- Automatically sets up persistent mobile authorization as part of login, so
+  an expired Hub session can be renewed on demand without a new BankID approval.
 - Serializes concurrent CLI/MCP use with an OS file lock, and fails closed on
   ambiguous child selection.
 
@@ -91,17 +91,17 @@ link is sensitive; treat it like the QR. Approve the login yourself in BankID.
    **web QR code to scan from another screen**, then starts that flow and
    gives you the link.
 4. Open the link and approve the login yourself in BankID. The agent waits
-   for the result and lets you know when you are signed in.
+   while mobile access for session renewal is set up automatically, then lets
+   you know when you are signed in.
 
 ## Tools
 
 | Tool | Purpose |
 | --- | --- |
 | `auth_cancel(login_id)` | Stop local polling and close the QR viewer. |
-| `auth_pair(confirm)` | Persist a long-lived mobile authorization after BankID. |
 | `auth_progress(login_id)` | Sanitized progress and HTTP stage diagnostics. |
 | `auth_revoke(confirm)` | Revoke the refresh credential, then remove it locally. |
-| `auth_start(confirm, method)` | Start BankID (`url` or `web-qr`); requires explicit confirmation. |
+| `auth_start(method)` | Start BankID (`url` or `web-qr`) and automatically bind persistent mobile access. |
 | `auth_status()` | Stored-session and pairing metadata, or active login status. |
 | `auth_wait(login_id)` | Wait until the attempt ends; returns immediately if already finished. |
 | `get_attachments(child_id, news_id, attachment_id, attachment_mode)` | Read one discovered attachment as inline text. Separate calls may run in parallel. |
@@ -110,9 +110,10 @@ link is sensitive; treat it like the QR. Approve the login yourself in BankID.
 | `get_notifications(child_ids?, offset, limit)` | Pupil-linked notifications, newest first, with independent state per child. |
 | `list_children()` | List linked children with stable IDs. |
 
-Authentication tools never return cookies or tokens, and `confirm` must be
-`true` after the user explicitly asks for the action. A failed read does not
-silently start a login.
+Authentication tools never return cookies or tokens. An agent starts login only
+at the user's request; `auth_start` has no `confirm` parameter or separate
+pairing step. Explicit revocation retains its `confirm` parameter. A failed
+read never silently starts BankID or creates a new mobile authorization.
 
 `get_news` merges shared posts by the server's news ID and returns `child_ids`
 for every requested child who received the post. Pagination applies after
@@ -193,13 +194,27 @@ The initial guardian login uses Stockholm's InfoMentor SSO: BankID approval is
 followed by a SAML handoff into InfoMentor Hub. It is not the mobile-app OAuth
 flow.
 
-After a successful login, users may explicitly pair the older InfoMentor Hub
-mobile-app authorization flow. We chose its refresh-capable protocol because it
+After BankID, login automatically sets up the older InfoMentor Hub mobile-app
+authorization flow, in both CLI and MCP. We chose its refresh-capable protocol because it
 can obtain a fresh Hub session on demand after the ordinary web session expires,
 allowing a longer-lived session without repeating BankID. The maximum refresh
 authorization lifetime is unknown; renewal is on demand, not a background loop.
 See [mobile authentication notes](docs/mobile-auth.md) for protocol evidence
 and limits.
+
+The login progresses through `pairing` and reports `complete` only after mobile
+access is verified and bound. If mobile setup fails, MCP reports `partial` with
+`web_session_stored=true` and `mobile_session_bound=false`; the verified web
+login remains usable, but mobile renewal is not available. CLI login exits
+nonzero for this partial outcome. `auth_wait` waits for mobile setup too.
+
+Existing mobile credentials are scope-checked, revoked and verified unusable
+before replacement. Access may be refreshed to authorize revocation. Old grants
+are never rebound: matching children do not prove the same guardian identity.
+Scope mismatch or ambiguous/network failures retain the
+credentials and report partial success rather than silently replacing them.
+Once synchronous mobile setup starts, local cancellation waits for it to finish
+persisting credentials; it cannot undo an upstream grant or rotation.
 
 ## Privacy and security
 

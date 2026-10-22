@@ -67,7 +67,7 @@ def test_server_registers_only_verified_data_tools() -> None:
     tools = asyncio.run(server.list_tools())
 
     assert {tool.name for tool in tools} == {
-        "auth_status", "auth_start", "auth_progress", "auth_cancel", "auth_pair", "auth_revoke",
+        "auth_status", "auth_start", "auth_progress", "auth_cancel", "auth_revoke",
         "auth_wait", "get_news", "get_attachments", "get_calendar", "get_notifications",
         "list_children",
     }

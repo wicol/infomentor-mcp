@@ -9,6 +9,7 @@ from infomentor_mcp.auth.locking import SessionLockTimeout
 from infomentor_mcp.auth.session import SessionStore
 from infomentor_mcp.auth.stockholm_bankid import StockholmBankId
 from infomentor_mcp.login import url, web_qr
+from infomentor_mcp.login.complete import complete_mobile_login
 from infomentor_mcp.login.web_qr import WebQr, WebQrOptions
 
 
@@ -29,6 +30,7 @@ class LoginAttempt:
         self.view: WebQr | None = None
         self.task: asyncio.Task | None = None
         self.ready = asyncio.Event()
+        self.web_session_stored = False
 
     @property
     def running(self) -> bool:
@@ -55,6 +57,8 @@ class LoginAttempt:
         result = {
             "login_id": self.id, "method": self.method, "status": status, "stage": stage,
             "error_code": self.error_code, "client_timeout_seconds": 240,
+            "web_session_stored": self.web_session_stored,
+            "mobile_session_bound": self.state in {"finishing", "complete"},
             "diagnostics": list(self.protocol.diagnostics) if self.protocol else [],
         }
         if include_link and self.link is not None and self.state == "waiting":
@@ -91,11 +95,17 @@ class LoginAttempt:
                 self.state = "saving"
                 # The async flock is held: a nested sync store.save would deadlock.
                 self.store._save(session)
-                if self.view:
-                    self.state = "finishing"
-                    self.view.update(None, "complete")
-                    await asyncio.sleep(1)
-                self.state = "complete"
+                self.web_session_stored = True
+            self.state = "pairing"
+            self.protocol.stage = "mobile_setup"
+            if self.view:
+                self.view.update(None, "pairing")
+            await complete_mobile_login(self.store, session)
+            if self.view:
+                self.state = "finishing"
+                self.view.update(None, "complete")
+                await asyncio.sleep(1)
+            self.state = "complete"
         except asyncio.CancelledError:
             # Closing the viewer after persistence cannot undo a completed login.
             self.state = "complete" if self.state == "finishing" else "cancelled"
@@ -121,6 +131,8 @@ class LoginAttempt:
             # Upstream exceptions and validation errors can contain credentials.
             self.state, self.error_code = "failed", "login_failed"
         finally:
+            if self.web_session_stored and self.state == "failed":
+                self.state, self.error_code = "partial", "mobile_authorization_failed"
             self.link = None
             cleanup = []
             if self.view:
@@ -137,7 +149,7 @@ class LoginAttempt:
                 await self.task
             except asyncio.CancelledError:
                 pass
-            if self.state not in {"complete", "failed"}:
+            if self.state not in {"complete", "failed", "partial"}:
                 self.state = "cancelled"
             self.link = None
             self.ready.set()

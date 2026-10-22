@@ -47,7 +47,7 @@ def test_invalid_measurement_options_fail_before_login():
     assert error.value.code == 2
 
 
-def test_cli_async_login_saves_verified_session(monkeypatch, capsys):
+def test_cli_async_login_saves_verified_session(monkeypatch, capsys, completed_mobile_login):
     from infomentor_mcp.auth.session import AuthSession, SessionStore
 
     async def fake_login():
@@ -56,4 +56,4 @@ def test_cli_async_login_saves_verified_session(monkeypatch, capsys):
     monkeypatch.setattr(cli.url, "login", fake_login)
     assert cli.main(["auth", "login", "--method", "url"]) == 0
     assert SessionStore().load() is not None
-    assert "local session was saved" in capsys.readouterr().out
+    assert "bound for mobile renewal" in capsys.readouterr().out

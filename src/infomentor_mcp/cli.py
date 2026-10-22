@@ -24,6 +24,7 @@ from infomentor_mcp.client.http import (
 )
 from infomentor_mcp.login import terminal_qr, url
 from infomentor_mcp.login.attempt import LoginAttempt
+from infomentor_mcp.login.complete import complete_mobile_login
 from infomentor_mcp.login.web_qr import WebQrOptions
 from infomentor_mcp.server import serve_stdio
 
@@ -34,7 +35,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     auth = subparsers.add_parser("auth", help="Manage the authenticated InfoMentor session")
     auth_subparsers = auth.add_subparsers(dest="auth_command", required=True)
-    auth_subparsers.add_parser("login", help="Start interactive BankID login")
+    auth_subparsers.add_parser(
+        "login", help="Log in with BankID and set up persistent mobile access",
+        description="Log in with BankID, then automatically set up mobile session renewal.",
+    )
     auth_subparsers.choices["login"].add_argument(
         "--method",
         choices=("qr", "url", "web-qr"),
@@ -209,7 +213,12 @@ def _run_login(args: argparse.Namespace) -> int:
                 if args.probe_sso_renewal:
                     session = _probe_sso_renewal(session)
                 store._save(session)
-        print("BankID login completed and the local session was saved.")
+            try:
+                await complete_mobile_login(store, session)
+            except Exception:
+                print("Web login saved, but mobile setup failed; session renewal is not bound.")
+                return 1
+        print("BankID login completed; the saved session is bound for mobile renewal.")
         return 0
 
     try:
