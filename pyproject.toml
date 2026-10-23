@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "infomentor-mcp"
 version = "0.1.0"
-description = "Local, read-only MCP server for Swedish InfoMentor guardian accounts"
+description = "Local MCP server for Swedish InfoMentor guardian accounts"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"

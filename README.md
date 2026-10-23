@@ -1,12 +1,13 @@
 # InfoMentor MCP
 
-A local, read-only [MCP](https://modelcontextprotocol.io) server for Swedish
+A local [MCP](https://modelcontextprotocol.io) server for Swedish
 InfoMentor guardian accounts, authenticated with Stockholm BankID.
 
 > Unofficial project. Not affiliated with InfoMentor, Stockholm stad, or BankID.
 
-School records are not edited. Fetching childcare comments does mark them read
-in InfoMentor; use `include_comments=false` to leave comments unopened.
+Childcare times, leave and guardian comments can be updated with explicit
+confirmation. Fetching childcare comments marks them read in InfoMentor;
+use `include_comments=false` to leave comments unopened.
 
 ## What it does
 
@@ -16,6 +17,7 @@ in InfoMentor; use `include_comments=false` to leave comments unopened.
   within a chosen date range; shared items are deduplicated.
 - Reads each child's submitted childcare schedule (Fritidsschema), including
   registered times, leave and care opening hours.
+- Previews and updates childcare times, leave and guardian comments for explicit dates.
 - Includes PDF/DOCX news attachment text inline by default, without saving
   files to disk.
 - Keeps one verified session across restarts, in the OS keyring or a `0600`
@@ -110,6 +112,8 @@ link is sensitive; treat it like the QR. Approve the login yourself in BankID.
 | `get_news(child_ids?, offset, limit, include_attachments, attachment_mode)` | Unique news for selected children, or all when omitted; attachment text included by default. |
 | `get_notifications(child_ids?, offset, limit)` | Pupil-linked notifications, newest first, with independent state per child. |
 | `list_children()` | List linked children with stable IDs. |
+| `set_childcare_comment(child_id, dates, comment, confirm)` | Preview or replace guardian comments on explicit dates; marks comments read. |
+| `set_childcare_schedule(child_id, dates, start_time?, end_time?, on_leave, confirm)` | Preview or set childcare times/leave on explicit dates. |
 
 Authentication tools never return cookies or tokens. An agent starts login only
 at the user's request; `auth_start` has no `confirm` parameter or separate
@@ -153,7 +157,7 @@ Each record includes `date`, `child_id`, `registration_id`, `starts_at`,
 `ends_at`, `opens_at`, `closes_at`, `on_leave` and `is_closed`, with times in
 `Europe/Stockholm`. Missing rows/times do not establish leave or no care need.
 The client requests exact weeks with automatic next-week fallback disabled and
-restores the original child selection. No schedule edits or absence writes are exposed.
+restores the original child selection. Reads do not edit schedules.
 
 `include_comments=true` is the default: days with comments on the returned page
 include staff and guardian text, authors and timestamps. **Hub marks comments
@@ -164,6 +168,31 @@ or page are not fetched. A per-day `comments_status` distinguishes `loaded`,
 comment request does not hide the schedule. `comments_marked_read=true` and
 `has_unread_comments=false` reflect a successful comment read; a null
 `comments_marked_read` means the outcome is unknown after a failed attempt.
+
+### Updating childcare
+
+`set_childcare_schedule` sets the same `HH:MM` start/end times, or `on_leave=true`
+without times, for one child and 1–31 explicit dates (`YYYY-MM-DD`), today or later
+in Stockholm. It refuses missing, locked, closed or non-editable days and times
+outside supplied opening hours. It preserves comments and never creates a recurring series.
+
+`set_childcare_comment` replaces the entire guardian comment on each requested
+date, including text written by another guardian. It requires an existing
+registration and comment edit permission. Staff comments and schedule times are
+not changed. Empty text/deletion is unsupported. **Previewing also marks comments read.**
+
+Both tools default to `confirm=false`: inspect the returned `before` and
+`requested` values, obtain approval for the exact changes, then call with
+`confirm=true`. All dates are checked before any save, then each day is saved and
+read back. Multi-date updates are not atomic: inspect each item's `status`.
+`verified` means read-back matched; `unknown` or `verification_mismatch` requires
+reading current data before deciding what to do. Remaining dates stay `not_sent`.
+Writes are never automatically replayed, and failed batches are not rolled back.
+Other clients can still edit concurrently; previews do not reserve or lock records.
+
+These writes follow the inspected Hub web-client protocol and are tested with
+synthetic responses. Schedule time updates and preservation of existing comments
+have also been live-verified. Leave and comment writes have not yet been live-verified.
 
 ### Notifications
 
@@ -257,8 +286,8 @@ persisting credentials; it cannot undo an upstream grant or rotation.
 ## Limitations
 
 - Version 0.1.0, beta. News, notifications, calendar, childcare schedules and child
-  listing are implemented. No school-record editing is exposed, but childcare
-  comment retrieval marks comments read.
+  listing are implemented, along with explicit childcare schedule/comment updates.
+  Childcare comment retrieval marks comments read.
 - Child attribution is checked by selected pupil **name**, not by a verified
   pupil ID. Duplicate names or ignored switches fail closed.
 - Hub sessions are restored on demand, never by a background loop. The maximum

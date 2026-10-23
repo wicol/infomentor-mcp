@@ -33,8 +33,22 @@ no bounty program exists.
 Childcare schedule retrieval includes comments by default. Hub's comment-read
 endpoint also marks those comments read; this is a verified server-side effect,
 not a separate write request. Use `include_comments=false` to leave them unopened.
-The MCP tool is not annotated read-only because of this effect. Schedule editing,
-absence registration and sending comments remain unavailable.
+The MCP tool is not annotated read-only because of this effect.
+
+## Childcare updates
+
+`set_childcare_schedule` and `set_childcare_comment` can modify school records.
+They are annotated destructive and default to preview (`confirm=false`). Agents
+must inspect the preview and obtain approval for the exact child, dates and changes
+before saving with `confirm=true`. The flag is an agent-facing guard, not a separate
+authorization boundary: any trusted MCP client can set it.
+
+Comment updates replace the guardian text, including another guardian's text.
+Even comment previews mark comments read. Schedule updates preserve comments;
+staff replies are never edited. Explicit-date updates are not atomic, do not lock
+out other clients, and are not automatically retried or rolled back. Read current
+state after an unknown outcome before retrying. Sick-absence reporting, recurring
+series and comment deletion are not exposed.
 
 ## Scope
 

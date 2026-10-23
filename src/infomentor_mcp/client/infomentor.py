@@ -1,4 +1,4 @@
-"""Reusable read-only Swedish InfoMentor Hub client."""
+"""Reusable Swedish InfoMentor Hub client."""
 
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ def _same_name(first: str, second: str | None) -> bool:
 
 
 class InfoMentorClient:
-    """A session-bound client that exposes only documented read operations."""
+    """A session-bound client for school reads and explicit childcare updates."""
 
     def __init__(
         self,
@@ -222,6 +222,24 @@ class InfoMentorClient:
                 start_date, end_date, child_ids, include_comments, offset, limit
             )
         )
+
+    def set_childcare_schedule(
+        self, child_id: str, dates: list[date], *, start_time: str | None = None,
+        end_time: str | None = None, on_leave: bool = False, confirm: bool = False,
+    ) -> dict:
+        from infomentor_mcp.client.childcare_writes import update_childcare
+
+        return update_childcare(
+            self, child_id, dates, start_time=start_time, end_time=end_time,
+            on_leave=on_leave, confirm=confirm,
+        )
+
+    def set_childcare_comment(
+        self, child_id: str, dates: list[date], comment: str, *, confirm: bool = False,
+    ) -> dict:
+        from infomentor_mcp.client.childcare_writes import update_childcare
+
+        return update_childcare(self, child_id, dates, comment=comment, confirm=confirm)
 
     def _get_childcare_schedule(
         self, start_date: date, end_date: date, child_ids: list[str] | None,

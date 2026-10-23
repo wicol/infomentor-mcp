@@ -77,7 +77,8 @@ def test_server_registers_only_verified_data_tools() -> None:
     assert {tool.name for tool in tools} == {
         "auth_status", "auth_start", "auth_progress", "auth_cancel", "auth_revoke",
         "auth_wait", "get_news", "get_attachments", "get_calendar", "get_notifications",
-        "get_childcare_schedule", "list_children",
+        "get_childcare_schedule", "list_children", "set_childcare_schedule",
+        "set_childcare_comment",
     }
     by_name = {tool.name: tool for tool in tools}
     assert by_name["get_news"].input_schema["properties"]["include_attachments"]["default"]
