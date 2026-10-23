@@ -33,12 +33,14 @@ from infomentor_mcp.client.models import (
     ChildcareDay,
     NewsItem,
     Notification,
+    TimetableLesson,
 )
 
 _PUPIL_SWITCH_PATH = re.compile(r"/Account/PupilSwitcher/SwitchPupil/([^/?#'\"\\]+)", re.I)
 _SELECTED_PUPIL_NAME = re.compile(r"selectedPupilName\s*:\s*'((?:\\.|[^'])*)'", re.I)
 MAX_CALENDAR_DAYS = 366
 MAX_CHILDCARE_DAYS = 31
+MAX_TIMETABLE_DAYS = 31
 
 
 class UnexpectedInfoMentorResponse(InfoMentorError):
@@ -376,6 +378,95 @@ class InfoMentorClient:
             day.comments_status = "fetch_failed"
         except (ValueError, KeyError, TypeError, AttributeError):
             day.comments_status = "invalid_response"
+
+    def get_timetable(
+        self, start_date: date, end_date: date, child_ids: list[str] | None = None,
+    ) -> list[TimetableLesson]:
+        """Read lesson/activity times, not childcare registrations or actual attendance."""
+        if not 0 <= (end_date - start_date).days < MAX_TIMETABLE_DAYS:
+            raise ValueError("Use end_date >= start_date and at most 31 calendar days.")
+        return self._with_session_renewal(
+            lambda: self._get_timetable(start_date, end_date, child_ids)
+        )
+
+    def _get_timetable(
+        self, start_date: date, end_date: date, child_ids: list[str] | None,
+    ) -> list[TimetableLesson]:
+        children = self._list_children()
+        selected = next((child for child in children if child.selected), None)
+        targets = (
+            [self._find_child(children, id_) for id_ in dict.fromkeys(child_ids)]
+            if child_ids is not None else children
+        )
+        linked_ids = {child.id for child in children}
+        items = []
+        # Match the web client's current browser offset (JS getTimezoneOffset sign).
+        # Response timestamps are Stockholm wall times, resolved individually below.
+        offset = datetime.now(ZoneInfo("Europe/Stockholm")).utcoffset()
+        payload = {
+            "start": start_date.isoformat(), "end": (end_date + timedelta(days=1)).isoformat(),
+            "UTCOffset": str(-int(offset.total_seconds() // 60)),
+        }
+        try:
+            for child in targets:
+                self._select_child(child.id, linked_ids)
+                response = self._http.hub_post(
+                    "/timetable/timetable/gettimetablelist", payload, form=True,
+                )
+                try:
+                    rows = response.json()
+                    if not isinstance(rows, list):
+                        raise ValueError("Not a lesson list")
+                    for row in rows:
+                        lesson = self._parse_timetable_lesson(child.id, row)
+                        if not start_date <= lesson.starts_at.date() <= end_date:
+                            raise ValueError("Lesson outside requested dates")
+                        items.append(lesson)
+                except (ValueError, KeyError, TypeError):
+                    raise UnexpectedInfoMentorResponse(
+                        "Timetable response had invalid lessons or unexpected dates."
+                    ) from None
+            return sorted(items, key=lambda item: (
+                item.starts_at, item.child_id, item.ends_at, item.title,
+            ))
+        finally:
+            if selected:
+                self._select_child(selected.id, linked_ids)
+
+    @staticmethod
+    def _parse_timetable_lesson(child_id: str, row: object) -> TimetableLesson:
+        try:
+            if (
+                not isinstance(row, dict) or not isinstance(row.get("title"), str)
+                or not isinstance(row.get("allDay"), bool)
+            ):
+                raise ValueError("Missing lesson fields")
+            start = _stockholm_datetime(row["start"])
+            end = _stockholm_datetime(row["end"])
+            if end.timestamp() < start.timestamp():
+                raise ValueError("Reversed lesson times")
+            notes = row.get("notes")
+            if notes is None:
+                notes = {}
+            if not isinstance(notes, dict):
+                raise ValueError("Invalid lesson notes")
+            for value in (
+                row.get("details"), row.get("establishmentName"),
+                notes.get("roomInfo"), notes.get("tutors"), notes.get("timetableNotes"),
+            ):
+                if value is not None and not isinstance(value, str):
+                    raise ValueError("Invalid lesson detail")
+            return TimetableLesson(
+                child_id=child_id, title=row["title"], starts_at=start, ends_at=end,
+                all_day=row["allDay"], room=notes.get("roomInfo") or None,
+                teachers=notes.get("tutors") or None, notes=notes.get("timetableNotes") or None,
+                details=row.get("details") or None,
+                establishment=row.get("establishmentName") or None,
+            )
+        except (ValueError, TypeError, KeyError):
+            raise UnexpectedInfoMentorResponse(
+                "Timetable lesson had invalid fields; values withheld."
+            ) from None
 
     def get_calendar(
         self, start_date: date, end_date: date, child_ids: list[str] | None = None,

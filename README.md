@@ -15,6 +15,7 @@ use `include_comments=false` to leave comments unopened.
   across all of them.
 - Reads notifications with independent state per child, and calendar events
   within a chosen date range; shared items are deduplicated.
+- Reads each child's lesson timetable, including room, teachers and notes where supplied.
 - Reads each child's submitted childcare schedule (Fritidsschema), including
   registered times, leave and care opening hours.
 - Previews and updates childcare times, leave and guardian comments for explicit dates.
@@ -111,6 +112,7 @@ link is sensitive; treat it like the QR. Approve the login yourself in BankID.
 | `get_childcare_schedule(start_date, end_date, child_ids?, offset, limit, include_comments)` | Fritidsschema with comments by default; fetching comments marks them read. |
 | `get_news(child_ids?, offset, limit, include_attachments, attachment_mode)` | Unique news for selected children, or all when omitted; attachment text included by default. |
 | `get_notifications(child_ids?, offset, limit)` | Pupil-linked notifications, newest first, with independent state per child. |
+| `get_timetable(start_date, end_date, child_ids?, offset, limit)` | Lesson/activity timetable with times, room, teachers and notes; not childcare. |
 | `list_children()` | List linked children with stable IDs. |
 | `set_childcare_comment(child_id, dates, comment, confirm)` | Preview or replace guardian comments on explicit dates; marks comments read. |
 | `set_childcare_schedule(child_id, dates, start_time?, end_time?, on_leave, confirm)` | Preview or set childcare times/leave on explicit dates. |
@@ -144,6 +146,33 @@ The client restores pupil selection and sends only the calendar list request,
 not event-detail or notification-state-update requests. Live event retrieval is
 verified; preservation of unread notification states still needs an isolated
 check without another active InfoMentor client.
+
+### Lesson timetable (Schema)
+
+`get_timetable` reads lesson/activity schedules, not childcare pickup times or
+actual attendance. Supply an inclusive `YYYY-MM-DD` date range of at most 31
+calendar days. Omit `child_ids` for all children or pass `[]` for none.
+
+Each record includes `child_id`, `title`, `starts_at`, `ends_at` and `all_day`,
+plus `room`, `teachers`, `notes`, `details` and `establishment` where supplied.
+Teacher names are returned as the server's text, not split into guessed identities.
+Consider notes/details when summarizing changes; no separate cancellation flag
+is supplied. Times use `Europe/Stockholm`. Lessons lack stable server IDs, so
+records stay separate for each child and are not deduplicated.
+
+Results are sorted by start time, child ID, end time and title before pagination.
+`total` and `has_more` indicate whether another page is needed (limit 1–100).
+An empty successful response means no entries were returned, not proof of a day
+off or that the full schedule has been published. Request/parse failures return
+an error instead of an empty or partial success.
+
+The client restores the original child selection and uses only the timetable
+list endpoint, with form-encoded requests and an exclusive upstream end date.
+It does not open comments/news or send notification-state updates. Retrieval for
+multiple children and pagination are live-verified. Notification states, including
+unread notifications, were unchanged in a before/after probe. No separate read-receipt
+request was found in the web timetable module; an isolated check with unread
+timetable-specific notifications has not yet been performed.
 
 ### Childcare schedule (Fritidsschema)
 
@@ -285,7 +314,7 @@ persisting credentials; it cannot undo an upstream grant or rotation.
 
 ## Limitations
 
-- Version 0.1.0, beta. News, notifications, calendar, childcare schedules and child
+- Version 0.1.0, beta. News, notifications, calendar, lesson timetables, childcare schedules and child
   listing are implemented, along with explicit childcare schedule/comment updates.
   Childcare comment retrieval marks comments read.
 - Child attribution is checked by selected pupil **name**, not by a verified

@@ -70,10 +70,10 @@ class InfoMentorHttpClient:
         safe_url = validate_auth_url(url)
         return self.client.request(method, safe_url, **kwargs)
 
-    def hub_post(self, path: str, payload: object) -> httpx.Response:
+    def hub_post(self, path: str, payload: object, *, form: bool = False) -> httpx.Response:
         response = self.client.post(
             f"{HUB_ORIGIN}{path}",
-            json=payload,
+            **({"data": payload} if form else {"json": payload}),
             headers={
                 "Accept": "application/json, text/javascript, */*; q=0.01",
                 "X-Requested-With": "XMLHttpRequest",

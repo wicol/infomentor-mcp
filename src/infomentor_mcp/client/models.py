@@ -79,6 +79,25 @@ class CalendarEntry(BaseModel):
     retrieved_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
+class TimetableLesson(BaseModel):
+    """One child's scheduled lesson/activity; Hub supplies no stable lesson ID."""
+
+    child_id: str
+    title: str
+    starts_at: datetime
+    ends_at: datetime
+    all_day: bool
+    room: str | None = None
+    teachers: str | None = None
+    notes: str | None = None
+    details: str | None = None
+    establishment: str | None = None
+    timezone: str = "Europe/Stockholm"
+    source_type: str = "timetable"
+    source_reference: str = "/timetable/timetable/gettimetablelist"
+    retrieved_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
 class ChildcareComment(BaseModel):
     author_type: str
     author: str | None = None
