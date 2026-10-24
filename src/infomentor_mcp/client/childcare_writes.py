@@ -150,7 +150,7 @@ def update_childcare(
                 result["selection_restored"] = False
                 # Never let an auth error here replay writes through the renewal wrapper.
 
-    return client._with_session_renewal(operation)
+    return client._with_session_renewal(operation, preserve_result_on_storage_error=True)
 
 
 def read_week(client, week: date) -> dict:

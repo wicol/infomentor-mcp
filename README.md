@@ -219,6 +219,12 @@ reading current data before deciding what to do. Remaining dates stay `not_sent`
 Writes are never automatically replayed, and failed batches are not rolled back.
 Other clients can still edit concurrently; previews do not reserve or lock records.
 
+If local session persistence fails after an operation returns, the write tools
+retain its results and add a `warnings` entry with code `session_storage_error`.
+This warning does not undo remote changes: do not repeat verified writes. Read
+current state before retrying unknown outcomes; subsequent requests may require
+reauthentication.
+
 These writes follow the inspected Hub web-client protocol and are tested with
 synthetic responses. Schedule time updates and preservation of existing comments
 have also been live-verified. Leave and comment writes have not yet been live-verified.

@@ -1,8 +1,10 @@
 import asyncio
 import json
+from contextlib import nullcontext
 from datetime import date, timedelta
 
 import httpx
+import keyring.errors
 import pytest
 
 from infomentor_mcp.auth.session import AuthSession
@@ -14,6 +16,21 @@ from infomentor_mcp.server import create_server
 ROOT = "https://hub.infomentor.se/TimeRegistration/TimeRegistration/"
 DAY = date(2099, 1, 5)
 WEEK = "2099-01-05"
+
+
+class FailingSaveStore:
+    def __init__(self, error):
+        self.error = error
+        self.session = AuthSession()
+
+    def locked(self, timeout=30):
+        return nullcontext()
+
+    def load(self):
+        return self.session
+
+    def save(self, session):
+        raise self.error
 
 
 @pytest.fixture
@@ -188,3 +205,39 @@ def test_comment_permission_and_care_hours(client, httpx_mock):
         client.set_childcare_schedule("one", [DAY], start_time="08:00", end_time="18:00",
                                       confirm=True)
     assert all("/Save" not in str(r.url) for r in httpx_mock.get_requests())
+
+
+@pytest.mark.parametrize("error_type", [OSError, ValueError, keyring.errors.KeyringError])
+def test_verified_write_survives_session_save_failure_in_mcp(
+    client, httpx_mock, monkeypatch, error_type,
+):
+    store = FailingSaveStore(error_type("synthetic-secret-must-not-be-returned"))
+    client._session_store = client._lock_store = store
+    monkeypatch.setattr(client, "_renew_session", lambda: pytest.fail("Write was replayed"))
+    httpx_mock.add_response(url=ROOT + "GetTimeRegistrations/", json=week_payload())
+    httpx_mock.add_response(url=ROOT + "SaveTimeRegistrations/", json={"success": True})
+    httpx_mock.add_response(url=ROOT + "GetTimeRegistrations/", json=week_payload(
+        endDateTime=WEEK + "T15:00:00",
+    ))
+    server = create_server(store, lambda _: client)
+    result = asyncio.run(server.call_tool("set_childcare_schedule", {
+        "child_id": "one", "dates": [DAY.isoformat()], "start_time": "08:00",
+        "end_time": "15:00", "confirm": True,
+    })).structured_content
+    assert result["status"] == "completed"
+    assert result["items"][0]["status"] == "verified"
+    assert result["warnings"][0]["code"] == "session_storage_error"
+    assert "synthetic-secret" not in json.dumps(result)
+    assert sum("/Save" in str(r.url) for r in httpx_mock.get_requests()) == 1
+
+
+def test_uncertain_write_result_also_survives_session_save_failure(client, httpx_mock, monkeypatch):
+    store = FailingSaveStore(OSError("synthetic storage error"))
+    client._session_store = client._lock_store = store
+    monkeypatch.setattr(client, "_renew_session", lambda: pytest.fail("Write was replayed"))
+    httpx_mock.add_response(url=ROOT + "GetTimeRegistrations/", json=week_payload())
+    httpx_mock.add_exception(httpx.ReadTimeout(""), url=ROOT + "SaveTimeRegistrations/")
+    result = client.set_childcare_schedule("one", [DAY], on_leave=True, confirm=True)
+    assert result["status"] == "incomplete" and result["items"][0]["status"] == "unknown"
+    assert result["warnings"][0]["code"] == "session_storage_error"
+    assert sum("/Save" in str(r.url) for r in httpx_mock.get_requests()) == 1

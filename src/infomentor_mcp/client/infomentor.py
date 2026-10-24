@@ -10,6 +10,7 @@ from urllib.parse import quote, urljoin, urlparse
 from zoneinfo import ZoneInfo
 
 import httpx
+import keyring.errors
 
 from infomentor_mcp.auth.session import AuthSession, SessionStore
 from infomentor_mcp.client.attachments import (
@@ -652,7 +653,7 @@ class InfoMentorClient:
             result.status = "fetch_failed"
             return result
 
-    def _with_session_renewal(self, operation):
+    def _with_session_renewal(self, operation, *, preserve_result_on_storage_error: bool = False):
         process_lock = self._lock_store.locked()
         with self._operation_lock, process_lock:
             self._original_child_id = None
@@ -661,11 +662,13 @@ class InfoMentorClient:
                 if latest is None:
                     raise AuthenticationExpiredError("No saved session; run auth login again.")
                 saved_cookies = sorted(
-                    (cookie.domain, cookie.path, cookie.name, cookie.value)
+                    (cookie.domain, cookie.path, cookie.name, cookie.value,
+                     cookie.secure, cookie.expires)
                     for cookie in latest.cookies
                 )
                 active_cookies = sorted(
-                    (cookie.domain, cookie.path, cookie.name, cookie.value)
+                    (cookie.domain, cookie.path, cookie.name, cookie.value,
+                     cookie.secure, cookie.expires)
                     for cookie in self._http.client.cookies.jar
                 )
                 if (
@@ -678,6 +681,7 @@ class InfoMentorClient:
                     self._http = InfoMentorHttpClient(latest)
                     previous_http.close()
             persist_current = True
+            operation_completed = False
             try:
                 try:
                     result = operation()
@@ -688,9 +692,23 @@ class InfoMentorClient:
                     self._renew_session()
                     persist_current = True
                     result = operation()
+                operation_completed = True
             finally:
                 if self._session_store and persist_current:
-                    self._session_store.save(self._http.session())
+                    try:
+                        self._session_store.save(self._http.session())
+                    except (OSError, ValueError, keyring.errors.KeyringError):
+                        if not preserve_result_on_storage_error or not operation_completed:
+                            raise
+                        # A local persistence failure does not undo remote changes.
+                        # Keep verified/unknown/per-day outcomes so callers do not blindly retry.
+                        result.setdefault("warnings", []).append({
+                            "code": "session_storage_error",
+                            "message": "Could not save the local session. Operation results are "
+                            "retained; do not repeat writes just because of this warning. "
+                            "Read current state before retrying uncertain changes. "
+                            "Reauthentication may be needed for subsequent requests.",
+                        })
             return result
 
     def _renew_session(self) -> None:

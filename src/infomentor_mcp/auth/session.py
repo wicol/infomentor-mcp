@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import tempfile
 from datetime import UTC, datetime
+from http.cookiejar import Cookie
 from pathlib import Path
 
 import httpx
@@ -53,12 +54,15 @@ class AuthSession(BaseModel):
     def apply_to(self, client: httpx.Client | httpx.AsyncClient) -> None:
         client.cookies.clear()
         for cookie in self.cookies:
-            client.cookies.set(
-                cookie.name,
-                cookie.value,
-                domain=cookie.domain,
-                path=cookie.path,
-            )
+            client.cookies.jar.set_cookie(Cookie(
+                version=0, name=cookie.name, value=cookie.value,
+                port=None, port_specified=False,
+                domain=cookie.domain, domain_specified=bool(cookie.domain),
+                domain_initial_dot=cookie.domain.startswith("."),
+                path=cookie.path, path_specified=bool(cookie.path),
+                secure=cookie.secure, expires=cookie.expires, discard=cookie.expires is None,
+                comment=None, comment_url=None, rest={}, rfc2109=False,
+            ))
 
     def stockholm_sso_only(self) -> AuthSession:
         """Copy only Stockholm cookies for an isolated SSO renewal probe."""
