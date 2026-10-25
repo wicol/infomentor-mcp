@@ -2,6 +2,7 @@ import asyncio
 import json
 from contextlib import nullcontext
 from datetime import date, timedelta
+from pathlib import Path
 
 import httpx
 import keyring.errors
@@ -19,6 +20,7 @@ WEEK = "2099-01-05"
 
 
 class FailingSaveStore:
+    fallback_path = Path("unused-session.json")
     def __init__(self, error):
         self.error = error
         self.session = AuthSession()

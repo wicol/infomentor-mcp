@@ -27,6 +27,7 @@ class Attachment(BaseModel):
     status: str = "available"
     text: str | None = None
     truncated: bool = False
+    content_sha256: str | None = None
 
 
 class NewsItem(BaseModel):

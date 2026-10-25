@@ -28,6 +28,16 @@ no bounty program exists.
 - Non-loopback QR binding requires an explicit public origin and is unencrypted
   HTTP. Only use it on a trusted network, and never expose it to the internet.
 
+## Change tracking storage
+
+Opt-in sync stores school snapshots, attachment text/hashes and change history
+in a private `0600` SQLite database beside the session fallback file. No cookies
+or tokens are stored there. History is pruned on sync after 90 days; currently
+observed snapshots remain. Logout does not erase this data: use
+`infomentor-mcp changes reset --confirm` explicitly. Protect JSON command output
+and any scheduler logs as school records. The database is bound to a hashed
+mobile authorization binding; a fresh login requires resetting tracking state.
+
 ## Read receipts
 
 Childcare schedule retrieval includes comments by default. Hub's comment-read

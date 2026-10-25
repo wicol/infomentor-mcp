@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import httpx
@@ -17,16 +18,18 @@ from infomentor_mcp.auth.mobile import MobileDiscoveryError, discover_mobile_aut
 from infomentor_mcp.auth.mobile_pairing import MobilePairing
 from infomentor_mcp.auth.saml import SamlSession
 from infomentor_mcp.auth.session import SessionStore
+from infomentor_mcp.changes import ChangeStore, sync
 from infomentor_mcp.client.http import (
     AuthenticationExpiredError,
     InfoMentorError,
     InfoMentorHttpClient,
 )
+from infomentor_mcp.client.infomentor import InfoMentorClient
 from infomentor_mcp.login import terminal_qr, url
 from infomentor_mcp.login.attempt import LoginAttempt
 from infomentor_mcp.login.complete import complete_mobile_login
 from infomentor_mcp.login.web_qr import WebQrOptions
-from infomentor_mcp.server import serve_stdio
+from infomentor_mcp.server import _change_call, _with_client, serve_stdio
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -104,7 +107,26 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--auth-host", default="127.0.0.1")
     serve.add_argument("--auth-port", type=int, default=0)
     serve.add_argument("--auth-public-url")
-    subparsers.add_parser("sync", help="Fetch and record school-data changes")
+    sync_parser = subparsers.add_parser("sync", help="Fetch and record school-data changes as JSON")
+    sync_parser.add_argument("--sources", nargs="+", choices=("news", "calendar"))
+    sync_parser.add_argument("--child-ids", nargs="+")
+    sync_parser.add_argument("--start-date", type=date.fromisoformat)
+    sync_parser.add_argument("--end-date", type=date.fromisoformat)
+    sync_parser.add_argument("--include-attachments", action=argparse.BooleanOptionalAction,
+                             default=True)
+    sync_parser.add_argument("--request-delay-seconds", type=float, default=1.0)
+    sync_parser.add_argument("--consumer", default="default")
+    sync_parser.add_argument("--limit", type=int, default=100)
+    changes = subparsers.add_parser("changes", help="Read, acknowledge, or reset change tracking")
+    commands = changes.add_subparsers(dest="changes_command", required=True)
+    get = commands.add_parser("get")
+    get.add_argument("--consumer", default="default")
+    get.add_argument("--limit", type=int, default=100)
+    ack = commands.add_parser("ack")
+    ack.add_argument("--consumer", required=True)
+    ack.add_argument("--cursor", required=True)
+    reset = commands.add_parser("reset")
+    reset.add_argument("--confirm", action="store_true", required=True)
     return parser
 
 
@@ -140,7 +162,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "serve":
         asyncio.run(serve_stdio(WebQrOptions(args.auth_host, args.auth_port, args.auth_public_url)))
         return 0
-    print("The sync command is scaffolded; its implementation is pending change tracking.")
+    if args.command in {"sync", "changes"}:
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
+        store = SessionStore()
+        changes = ChangeStore(store.fallback_path.with_name("changes.sqlite3"))
+        if args.command == "sync":
+            result = _with_client(store, lambda s: InfoMentorClient(s, session_store=store),
+                                  lambda client: _change_call(lambda: sync(
+                                      client, changes, args.sources, args.child_ids,
+                                      args.start_date, args.end_date, args.include_attachments,
+                                      args.request_delay_seconds,
+                                      args.consumer, args.limit,
+                                  )))
+        else:
+            def operation():
+                if args.changes_command == "get":
+                    return changes.get(args.consumer, args.limit)
+                if args.changes_command == "ack":
+                    return changes.ack(args.consumer, args.cursor)
+                # Serialize reset with syncs using the same session lock.
+                with store.locked():
+                    return changes.reset()
+            result = _change_call(operation)
+        print(json.dumps(result, ensure_ascii=False))
+        return 1 if "error" in result or result.get("status") == "partial" else 0
     return 2
 
 

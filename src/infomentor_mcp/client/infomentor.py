@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import html
 import re
 import threading
+import time
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from urllib.parse import quote, urljoin, urlparse
 from zoneinfo import ZoneInfo
@@ -48,6 +51,21 @@ class UnexpectedInfoMentorResponse(InfoMentorError):
     """Hub responded successfully but not in the documented shape."""
 
 
+class ChildSession:
+    """Verified targets in a locked operation; switching never restores between children."""
+
+    def __init__(self, client, children, child_ids):
+        self.client = client
+        self.linked_ids = {child.id for child in children}
+        self.targets = ([client._find_child(children, id_) for id_ in dict.fromkeys(child_ids)]
+                        if child_ids is not None else children)
+
+    def select(self, child):
+        if child not in self.targets:
+            raise ValueError("Child is not in this session's targets.")
+        self.client._select_child(child.id, self.linked_ids)
+
+
 def parse_child_ids(page: str) -> list[str]:
     """Extract linked pupil IDs from Hub's generated switcher routes."""
     return list(dict.fromkeys(match.group(1) for match in _PUPIL_SWITCH_PATH.finditer(page)))
@@ -86,6 +104,101 @@ class InfoMentorClient:
 
     def close(self) -> None:
         self._http.close()
+
+    @contextmanager
+    def _child_session(self, child_ids=None):
+        with self._operation_lock, self._lock_store.locked():
+            children = self._list_children()
+            selected = next(child for child in children if child.selected)
+            try:
+                yield ChildSession(self, children, child_ids)
+            finally:
+                self._select_child(selected.id, {child.id for child in children})
+
+    def collect_changes(self, sources, child_ids, start_date, end_date,
+                        include_attachments=True, request_delay_seconds=1.0):
+        """Collect independent, complete child/source snapshots before persisting any changes."""
+        if not sources or set(sources) - {"news", "calendar"}:
+            raise ValueError("Choose news and/or calendar.")
+        if not 0 <= (end_date - start_date).days < MAX_CALENDAR_DAYS:
+            raise ValueError("Use an inclusive calendar range of 1-366 days.")
+        if not 0 <= request_delay_seconds <= 60:
+            raise ValueError("Request delay must be between 0 and 60 seconds.")
+        last_request = None
+
+        def pace(request):
+            nonlocal last_request
+            if last_request is not None:
+                time.sleep(max(0, request_delay_seconds - (time.monotonic() - last_request)))
+            last_request = time.monotonic()
+
+        def fetch():
+            snapshots, errors, attachment_checks = [], [], []
+            # Attach to the current HTTP client on every replay after renewal.
+            hooks = self._http.client.event_hooks["request"]
+            hooks.append(pace)
+            try:
+                with self._child_session(child_ids) as children:
+                    for child in children.targets:
+                        children.select(child)
+                        for source in dict.fromkeys(sources):
+                            try:
+                                if source == "news":
+                                    items = self._get_selected_child_news(child.id)
+                                    if include_attachments:
+                                        self._enrich_news(items)
+                                        for item in items:
+                                            for attachment in item.attachments:
+                                                attachment_checks.append({
+                                                    "child_id": child.id, "news_id": item.id,
+                                                    "attachment_id": attachment.id,
+                                                    "status": attachment.status,
+                                                    "content_checked": bool(
+                                                        attachment.content_sha256,
+                                                    ),
+                                                })
+                                else:
+                                    items = self._get_selected_child_calendar(
+                                        child.id, start_date, end_date,
+                                    )
+                                snapshots.append({
+                                    "child_id": child.id, "source": source,
+                                    "items": [i.model_dump(mode="json") for i in items],
+                                })
+                            except AuthenticationExpiredError:
+                                raise
+                            except (InfoMentorError, httpx.HTTPError):
+                                errors.append({"child_id": child.id, "source": source,
+                                               "code": "fetch_failed"})
+                return {"snapshots": snapshots, "errors": errors,
+                        "binding": self._http.mobile_binding,
+                        "attachment_checks": attachment_checks}
+            finally:
+                hooks.remove(pace)
+
+        return self._with_session_renewal(fetch)
+
+    def _enrich_news(self, items, cache=None, remaining=MAX_TOTAL_TEXT_CHARS):
+        cache = {} if cache is None else cache
+        for item in items:
+            for index, attachment in enumerate(item.attachments):
+                if attachment.status != "available":
+                    continue
+                if remaining <= 0 or (attachment.id not in cache and len(cache) >= MAX_ATTACHMENTS):
+                    result = attachment.model_copy(update={"status": "limit_reached"})
+                elif attachment.id in cache:
+                    result = cache[attachment.id].model_copy(
+                        deep=True, update={"name": attachment.name},
+                    )
+                else:
+                    result = self._read_attachment(item.id, attachment)
+                    cache[attachment.id] = result.model_copy(deep=True)
+                if result.text:
+                    result.truncated |= len(result.text) > remaining
+                    result.text = result.text[:remaining]
+                    remaining -= len(result.text)
+                item.attachments[index] = result
+        return remaining
 
     def list_children(self) -> list[Child]:
         return self._with_session_renewal(self._list_children)
@@ -145,17 +258,10 @@ class InfoMentorClient:
         self, child_ids: list[str] | None, offset: int = 0, limit: int | None = None,
         include_attachments: bool = False,
     ) -> list[NewsItem]:
-        children = self._list_children()
-        selected = next((child for child in children if child.selected), None)
-        targets = (
-            [self._find_child(children, child_id) for child_id in dict.fromkeys(child_ids)]
-            if child_ids is not None else children
-        )
-        child_id_set = {child.id for child in children}
         items: dict[str, NewsItem] = {}
-        try:
-            for child in targets:
-                self._select_child(child.id, child_id_set)
+        with self._child_session(child_ids) as children:
+            for child in children.targets:
+                children.select(child)
                 for item in self._get_selected_child_news(child.id):
                     if item.id not in items:
                         items[item.id] = item
@@ -169,30 +275,9 @@ class InfoMentorClient:
                 for item in page:
                     if not item.attachments:
                         continue
-                    self._select_child(item.child_ids[0], child_id_set)
-                    for index, attachment in enumerate(item.attachments):
-                        if attachment.status != "available":
-                            continue
-                        if remaining <= 0:
-                            result = attachment.model_copy(update={"status": "limit_reached"})
-                        elif attachment.id in cache:
-                            result = cache[attachment.id].model_copy(
-                                deep=True, update={"name": attachment.name}
-                            )
-                        elif len(cache) >= MAX_ATTACHMENTS:
-                            result = attachment.model_copy(update={"status": "limit_reached"})
-                        else:
-                            result = self._read_attachment(item.id, attachment)
-                            cache[attachment.id] = result.model_copy(deep=True)
-                        if result.text:
-                            result.truncated |= len(result.text) > remaining
-                            result.text = result.text[:remaining]
-                            remaining -= len(result.text)
-                        item.attachments[index] = result
+                    self._select_child(item.child_ids[0], children.linked_ids)
+                    remaining = self._enrich_news([item], cache, remaining)
             return page
-        finally:
-            if selected:
-                self._select_child(selected.id, child_id_set)
 
     def get_attachments(self, child_id: str, news_id: str, attachment_id: str) -> Attachment:
         """Read one attachment rediscovered in a linked child's current news feed."""
@@ -482,40 +567,32 @@ class InfoMentorClient:
     def _get_calendar(
         self, start_date: date, end_date: date, child_ids: list[str] | None,
     ) -> list[CalendarEntry]:
-        children = self._list_children()
-        selected = next((child for child in children if child.selected), None)
-        targets = (
-            [self._find_child(children, id_) for id_ in dict.fromkeys(child_ids)]
-            if child_ids is not None else children
-        )
-        linked_ids = {child.id for child in children}
         items: dict[str, CalendarEntry] = {}
-        try:
-            for child in targets:
-                self._select_child(child.id, linked_ids)
-                response = self._http.hub_post("/calendarv2/calendarv2/getentries", {
-                    "startDate": start_date.isoformat(), "endDate": end_date.isoformat(),
-                })
-                try:
-                    rows = response.json()
-                    if not isinstance(rows, list):
-                        raise ValueError("Not a list")
-                except ValueError:
-                    raise UnexpectedInfoMentorResponse(
-                        "Calendar response did not contain an event list."
-                    ) from None
-                for row in rows:
-                    entry = self._parse_calendar_entry(child.id, row)
-                    if entry.starts_at.date() > end_date or entry.ends_at.date() < start_date:
-                        continue
+        with self._child_session(child_ids) as children:
+            for child in children.targets:
+                children.select(child)
+                for entry in self._get_selected_child_calendar(child.id, start_date, end_date):
                     if entry.id not in items:
                         items[entry.id] = entry
                     elif child.id not in items[entry.id].child_ids:
                         items[entry.id].child_ids.append(child.id)
             return sorted(items.values(), key=lambda item: (item.starts_at, item.id))
-        finally:
-            if selected:
-                self._select_child(selected.id, linked_ids)
+
+    def _get_selected_child_calendar(self, child_id, start_date, end_date):
+        response = self._http.hub_post("/calendarv2/calendarv2/getentries", {
+            "startDate": start_date.isoformat(), "endDate": end_date.isoformat(),
+        })
+        try:
+            rows = response.json()
+            if not isinstance(rows, list):
+                raise ValueError("Not a list")
+        except ValueError:
+            raise UnexpectedInfoMentorResponse(
+                "Calendar response did not contain an event list."
+            ) from None
+        entries = [self._parse_calendar_entry(child_id, row) for row in rows]
+        return [entry for entry in entries if entry.starts_at.date() <= end_date
+                and entry.ends_at.date() >= start_date]
 
     @staticmethod
     def _parse_calendar_entry(child_id: str, row: object) -> CalendarEntry:
@@ -648,6 +725,7 @@ class InfoMentorClient:
                     if len(content) > MAX_FILE_BYTES:
                         result.status = "too_large"
                         return result
+            result.content_sha256 = hashlib.sha256(content).hexdigest()
             return extract_text(result, bytes(content))
         except (httpx.HTTPError, ValueError):
             result.status = "fetch_failed"
@@ -818,10 +896,11 @@ class InfoMentorClient:
             ) from error
         if not isinstance(source_items, list):
             raise UnexpectedInfoMentorResponse("News response items was not a list.")
+        if any(not isinstance(item, dict) for item in source_items):
+            raise UnexpectedInfoMentorResponse("News response contained invalid items.")
         return [
             self._parse_news_item(child_id, item)
             for item in source_items
-            if isinstance(item, dict)
         ]
 
     @staticmethod

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 import threading
 from collections.abc import Callable
 from contextlib import asynccontextmanager
@@ -19,6 +20,7 @@ from infomentor_mcp import __version__
 from infomentor_mcp.auth.locking import SessionLockTimeout
 from infomentor_mcp.auth.mobile_pairing import MobileFlowError, MobilePairing
 from infomentor_mcp.auth.session import AuthSession, SessionStore
+from infomentor_mcp.changes import ChangeStore, ChangeTrackingError, sync
 from infomentor_mcp.client.http import AuthenticationExpiredError, InfoMentorError
 from infomentor_mcp.client.infomentor import (
     MAX_CALENDAR_DAYS,
@@ -34,11 +36,13 @@ def create_server(
     session_store: SessionStore | None = None,
     client_factory: Callable[[AuthSession], InfoMentorClient] | None = None,
     web_options: WebQrOptions | None = None,
+    change_store: ChangeStore | None = None,
 ) -> MCPServer:
     """Create the local server without starting a transport."""
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     store = session_store or SessionStore()
+    changes = change_store or ChangeStore(store.fallback_path.with_name("changes.sqlite3"))
     attempt: LoginAttempt | None = None
 
     @asynccontextmanager
@@ -63,6 +67,46 @@ def create_server(
         ),
         lifespan=lifespan,
     )
+
+    @server.tool(
+        description=(
+            "Fetch news/calendar changes without an LLM. Defaults to both sources, all children, "
+            "including news attachments. Calendar defaults to today through 90 days ahead "
+            "in Stockholm (inclusive, maximum 366 days). Pauses between pupil/data requests. "
+            "First fetch creates a baseline without historical alerts. No deletion inference. "
+            "Retains school data with 90-day cleanup on sync; needs bound mobile authorization. "
+            "Returns a page of pending changes for the consumer, including earlier unacknowledged "
+            "work. Use ack_changes only after successful processing of the entire page. "
+            "Does not start an agent or BankID."
+        ), annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False),
+    )
+    def sync_changes(
+        sources: list[Literal["news", "calendar"]] | None = None,
+        child_ids: list[str] | None = None, start_date: date | None = None,
+        end_date: date | None = None, include_attachments: bool = True,
+        request_delay_seconds: float = 1.0,
+        consumer: str = "default", limit: int = 100,
+    ) -> dict[str, Any]:
+        return _with_client(store, factory, lambda client: _change_call(lambda: sync(
+            client, changes, sources, child_ids, start_date, end_date,
+            include_attachments, request_delay_seconds, consumer, limit,
+        )))
+
+    @server.tool(description=(
+        "Read locally stored changes for a named consumer; no InfoMentor requests. "
+        "Reading does not acknowledge delivery. Repeated reads return unacknowledged changes. "
+        "Use next_cursor with ack_changes only after processing the entire returned page. "
+        "has_changes indicates pending work, including changes detected by earlier syncs."
+    ))
+    def get_changes(consumer: str = "default", limit: int = 100) -> dict[str, Any]:
+        return _change_call(lambda: changes.get(consumer, limit))
+
+    @server.tool(description=(
+        "Acknowledge all changes through a cursor previously returned to this consumer. "
+        "Call only after successfully processing the entire page. Consumers are independent."
+    ), annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False))
+    def ack_changes(consumer: str, cursor: str) -> dict[str, Any]:
+        return _change_call(lambda: changes.ack(consumer, cursor))
 
     @server.tool(description="Show whether a local InfoMentor session is stored.")
     def auth_status() -> dict[str, Any]:
@@ -420,6 +464,21 @@ def create_server(
             )
 
     return server
+
+
+def _change_call(operation):
+    try:
+        return operation()
+    except ChangeTrackingError as error:
+        return {"error": {"code": error.code, "message": str(error)}}
+    except SessionLockTimeout:
+        return {"error": {"code": "session_busy", "message": "Session is busy; retry shortly."}}
+    except ValueError:
+        return {"error": {"code": "invalid_input",
+                          "message": "Invalid tracking parameters or state."}}
+    except (OSError, sqlite3.Error):
+        return {"error": {"code": "change_storage_error",
+                          "message": "Cannot read or save private change tracking state."}}
 
 
 def _with_client(

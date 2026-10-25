@@ -1,3 +1,4 @@
+import json
 from contextlib import nullcontext
 
 import pytest
@@ -28,9 +29,13 @@ def test_auth_status_accepts_verify_flag(capsys, monkeypatch) -> None:
     assert "No authenticated session" in capsys.readouterr().out
 
 
-def test_pending_command_returns_nonzero(capsys) -> None:
-    assert cli.main(["sync"]) == 2
-    assert "sync command" in capsys.readouterr().out
+def test_sync_without_login_returns_json(capsys, monkeypatch, tmp_path) -> None:
+    store = EmptySessionStore()
+    store.fallback_path = tmp_path / "session.json"
+    store.locked = lambda **_: nullcontext()
+    monkeypatch.setattr(cli, "SessionStore", lambda: store)
+    assert cli.main(["sync"]) == 1
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "authentication_required"
 
 
 def test_measurement_cli_accepts_idle_mode_without_starting_login(monkeypatch):

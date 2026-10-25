@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import time
 from io import BytesIO
 from zipfile import ZipFile
@@ -27,6 +28,17 @@ def docx():
           <w:tbl><w:tr><w:tc><w:p><w:r><w:t>Table text</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
           </w:body></w:document>''')
     return content.getvalue()
+
+
+def test_download_hash_covers_original_bytes(docx, httpx_mock):
+    httpx_mock.add_response(url="https://hub.infomentor.se" + URL, content=docx)
+    client = InfoMentorClient(AuthSession())
+    try:
+        result = client._read_attachment("7", Attachment(id="123", name="weekly.docx"))
+        assert result.content_sha256 == hashlib.sha256(docx).hexdigest()
+        assert result.status == "extracted"
+    finally:
+        client.close()
 
 
 @pytest.mark.parametrize("url,valid", [
