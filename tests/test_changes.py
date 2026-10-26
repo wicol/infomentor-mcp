@@ -3,14 +3,17 @@ import json
 from copy import deepcopy
 from datetime import date
 
+import httpx
 import pytest
 
-from infomentor_mcp.auth.session import AuthSession, SessionStore
-from infomentor_mcp.changes import ChangeStore, ChangeTrackingError, sync
-from infomentor_mcp.client.http import AuthenticationExpiredError, InfoMentorError
-from infomentor_mcp.client.infomentor import InfoMentorClient
-from infomentor_mcp.client.models import Child
-from infomentor_mcp.server import create_server
+from infomentor_mcp.app.cli import Cli
+from infomentor_mcp.app.mcp import McpApp
+from infomentor_mcp.app.service import InfoMentorService
+from infomentor_mcp.changes.store import ChangeStore
+from infomentor_mcp.changes.tracker import ChangeTracker
+from infomentor_mcp.errors import ChangeTrackingError
+from infomentor_mcp.hub.hub import Hub
+from infomentor_mcp.storage.session import AuthSession, SessionStore
 
 
 def batch(title="First", children=("one",), source="news"):
@@ -137,84 +140,115 @@ def test_retention_never_silently_advances_an_existing_consumer(tmp_path):
     assert store.get("new")["changes"][0]["after"]["title"] == "Third"
 
 
+NEWS = "/Communication/News/GetNewsList"
+CALENDAR = "/calendarv2/calendarv2/getentries"
+DOWNLOAD = "/Resources/Resource/Download/123"
+
+
+NEWS = "/Communication/News/GetNewsList"
+CALENDAR = "/calendarv2/calendarv2/getentries"
+DOWNLOAD = "/Resources/Resource/Download/123"
+ATTACHMENT = DOWNLOAD + "?api=IM2&ModuleType=NewsItem&ConnectionId=post"
+DAYS = (date(2026, 1, 1), date(2026, 1, 2))
+
+
+class CountingRenewal:
+    def __init__(self):
+        self.calls = 0
+
+    def renew(self, current):
+        self.calls += 1
+        return AuthSession(mobile_binding=current.mobile_binding)
+
+
 @pytest.fixture
-def collecting_client(monkeypatch):
-    client = InfoMentorClient(AuthSession(mobile_binding="synthetic-binding"))
-    log = []
-    children = [Child(id="one", name="One", selected=True), Child(id="two", name="Two")]
-    monkeypatch.setattr(client, "_list_children", lambda: log.append("discover") or children)
-    monkeypatch.setattr(client, "_select_child", lambda id_, _: log.append(f"select:{id_}"))
-    monkeypatch.setattr(client, "_get_selected_child_news",
-                        lambda id_: log.append(f"news:{id_}") or [])
-    monkeypatch.setattr(client, "_get_selected_child_calendar",
-                        lambda id_, *_: log.append(f"calendar:{id_}") or [])
-    yield client, log
-    client.close()
+def tracking_hub(fake_hub):
+    fake_hub.children = {"one": "One", "two": "Two"}
+    fake_hub.selected = "one"
+    return fake_hub
 
 
-def test_collection_is_child_first_with_single_discovery(collecting_client):
-    client, log = collecting_client
-    result = client.collect_changes(["news", "calendar"], None, date(2026, 1, 1), date(2026, 1, 2))
-    assert log == ["discover", "select:one", "news:one", "calendar:one",
-                   "select:two", "news:two", "calendar:two", "select:one"]
+@pytest.fixture
+def bound_store():
+    store = SessionStore()
+    store.save(AuthSession(mobile_binding="synthetic-binding"))
+    return store
+
+
+@pytest.fixture
+def tracker(tracking_hub, bound_store, tmp_path):
+    with Hub(bound_store) as hub:
+        yield ChangeTracker(hub, ChangeStore(tmp_path / "changes.sqlite3"))
+
+
+def news_items(title="News", attachment=False):
+    def respond(request, child):
+        return {"items": [{"id": "post", "title": title, "content": "Synthetic", "attachments": [
+            {"title": "weekly.docx", "url": ATTACHMENT},
+        ] if attachment else []}]}
+    return respond
+
+
+def test_collection_is_child_first_with_single_discovery(tracking_hub, tracker):
+    tracking_hub.route(NEWS, lambda request, child: {"items": []})
+    tracking_hub.route(CALENDAR, lambda request, child: [])
+    result = tracker.collect(["news", "calendar"], None, *DAYS, request_delay_seconds=0)
+    assert tracking_hub.reads == [
+        (NEWS, "one"), (CALENDAR, "one"), (NEWS, "two"), (CALENDAR, "two"),
+    ]
+    assert len(tracking_hub.requests("/")) == 1
+    assert tracking_hub.selected == "one"
     assert len(result["snapshots"]) == 4
-    assert not client._http.client.event_hooks["request"]
 
 
-def test_partial_errors_restore_child_and_preserve_other_sources(collecting_client, monkeypatch):
-    client, log = collecting_client
-
-    def fail(_):
-        raise InfoMentorError("withheld")
-
-    monkeypatch.setattr(client, "_get_selected_child_news", fail)
-    result = client.collect_changes(["news", "calendar"], None, date(2026, 1, 1), date(2026, 1, 2))
-    assert len(result["errors"]) == 2 and len(result["snapshots"]) == 2
-    assert log[-1] == "select:one"
-
-
-def test_renewal_replays_collection_before_persisting(collecting_client, monkeypatch):
-    client, log = collecting_client
-    calls = []
-
-    def news(id_):
-        calls.append(id_)
-        if len(calls) == 1:
-            raise AuthenticationExpiredError("Expired")
-        return []
-
-    monkeypatch.setattr(client, "_get_selected_child_news", news)
-    monkeypatch.setattr(client, "_renew_session", lambda: log.append("renew"))
-    result = client.collect_changes(["news"], None, date(2026, 1, 1), date(2026, 1, 2))
-    assert len(result["snapshots"]) == 2
-    assert log.count("discover") == 2 and log.count("renew") == 1
+def test_partial_errors_restore_child_and_preserve_other_sources(tracking_hub, tracker):
+    tracking_hub.route(NEWS, lambda request, child: httpx.Response(503))
+    tracking_hub.route(CALENDAR, lambda request, child: [])
+    result = tracker.collect(["news", "calendar"], None, *DAYS, request_delay_seconds=0)
+    assert [(e["child_id"], e["source"]) for e in result["errors"]] == [
+        ("one", "news"), ("two", "news"),
+    ]
+    assert [s["source"] for s in result["snapshots"]] == ["calendar", "calendar"]
+    assert tracking_hub.selected == "one"
 
 
-def test_request_pacing_applies_to_each_http_request(collecting_client, monkeypatch, httpx_mock):
-    client, _ = collecting_client
+def test_renewal_replays_collection_before_persisting(tracking_hub, bound_store, tmp_path):
+    reads = []
+
+    def news(request, child):
+        reads.append(child)
+        return httpx.Response(401) if len(reads) == 1 else {"items": []}
+
+    tracking_hub.route(NEWS, news)
+    renewal = CountingRenewal()
+    with Hub(bound_store, renewal) as hub:
+        result = ChangeTracker(hub, ChangeStore(tmp_path / "changes.sqlite3")).collect(
+            ["news"], None, *DAYS, request_delay_seconds=0,
+        )
+    assert renewal.calls == 1
+    assert len(tracking_hub.requests("/")) == 2
+    assert reads == ["one", "one", "two"]
+    assert len(result["snapshots"]) == 2 and not result["errors"]
+    assert result["binding"] == "synthetic-binding"
+
+
+def test_request_pacing_applies_to_each_http_request(tracking_hub, tracker, monkeypatch):
     sleeps = []
-    monkeypatch.setattr("infomentor_mcp.client.infomentor.time.sleep", sleeps.append)
-    monkeypatch.setattr("infomentor_mcp.client.infomentor.time.monotonic", lambda: 10)
-    endpoint = "https://hub.infomentor.se/calendarv2/calendarv2/getentries"
-    httpx_mock.add_response(url=endpoint, json=[])
-    httpx_mock.add_response(url=endpoint, json=[])
-
-    def news(_):
-        for _ in range(2):
-            client._http.hub_post("/calendarv2/calendarv2/getentries", {})
-        return []
-
-    monkeypatch.setattr(client, "_get_selected_child_news", news)
-    client.collect_changes(["news"], ["one"], date(2026, 1, 1), date(2026, 1, 2),
-                           request_delay_seconds=0.5)
-    assert sleeps == [0.5]
+    monkeypatch.setattr("infomentor_mcp.changes.tracker.time.sleep", sleeps.append)
+    monkeypatch.setattr("infomentor_mcp.changes.tracker.time.monotonic", lambda: 10)
+    tracking_hub.route(NEWS, lambda request, child: {"items": []})
+    tracker.collect(["news"], ["one"], *DAYS, request_delay_seconds=0.5)
+    requests = tracking_hub.httpx_mock.get_requests()
+    assert len(requests) > 2
+    assert sleeps == [0.5] * (len(requests) - 1)
+    assert not tracker.hub.transport.client.event_hooks["request"]
 
 
 def test_mcp_change_delivery_does_not_need_a_live_session(tmp_path):
     changes = ChangeStore(tmp_path / "changes.sqlite3")
     changes.record(batch())
     changes.record(batch("Updated"))
-    server = create_server(SessionStore(tmp_path / "session.json"), change_store=changes)
+    server = McpApp(InfoMentorService(SessionStore(tmp_path / "session.json"), changes)).build()
     result = asyncio.run(server.call_tool("get_changes", {"consumer": "agent"})).structured_content
     assert result["has_changes"]
     ack = asyncio.run(server.call_tool("ack_changes", {
@@ -224,105 +258,92 @@ def test_mcp_change_delivery_does_not_need_a_live_session(tmp_path):
     assert "synthetic-binding" not in json.dumps(result)
 
 
-def test_sync_returns_old_pending_work_on_unchanged_fetch(collecting_client, monkeypatch, tmp_path):
-    client, _ = collecting_client
-    store = ChangeStore(tmp_path / "changes.sqlite3")
-    store.record(batch())
-    store.record(batch("Updated"))
-    monkeypatch.setattr(client, "collect_changes", lambda *_: batch("Updated"))
-    result = sync(client, store, consumer="agent")
+def test_sync_returns_old_pending_work_on_unchanged_fetch(tracking_hub, tracker):
+    tracking_hub.route(CALENDAR, lambda request, child: [])
+    title = "First"
+    tracking_hub.route(NEWS, lambda request, child: news_items(title)(request, child))
+
+    def run():
+        return tracker.sync(consumer="agent", request_delay_seconds=0)
+
+    assert not run()["has_changes"]
+    title = "Updated"
+    assert run()["new_changes"] == 1
+    result = run()
     assert result["new_changes"] == 0 and result["has_changes"]
-    store.ack("agent", result["next_cursor"])
-    assert not sync(client, store, consumer="agent")["has_changes"]
+    tracker.changes.ack("agent", result["next_cursor"])
+    assert not run()["has_changes"]
 
 
-def test_cli_sync_get_ack_and_reset_are_json(monkeypatch, capsys):
-    from infomentor_mcp import cli
-
-    session = SessionStore()
-    session.save(AuthSession(mobile_binding="synthetic-binding"))
-    current = batch()
-    monkeypatch.setattr(InfoMentorClient, "collect_changes", lambda *_, **__: current)
-    assert cli.main(["sync", "--consumer", "agent"]) == 0
+def test_cli_sync_get_ack_and_reset_are_json(tracking_hub, bound_store, capsys):
+    tracking_hub.route(CALENDAR, lambda request, child: [])
+    title = "First"
+    tracking_hub.route(NEWS, lambda request, child: news_items(title)(request, child))
+    cli = Cli(bound_store)
+    args = ["sync", "--consumer", "agent", "--request-delay-seconds", "0"]
+    assert cli.run(args) == 0
     assert not json.loads(capsys.readouterr().out)["has_changes"]
-    current = batch("Changed")
-    assert cli.main(["sync", "--sources", "news", "--consumer", "agent"]) == 0
+    title = "Changed"
+    assert cli.run([*args, "--sources", "news"]) == 0
     result = json.loads(capsys.readouterr().out)
     assert result["has_changes"] and result["new_changes"] == 1
-    assert cli.main(["changes", "get", "--consumer", "agent"]) == 0
+    assert cli.run(["changes", "get", "--consumer", "agent"]) == 0
     assert json.loads(capsys.readouterr().out)["changes"] == result["changes"]
-    assert cli.main(["changes", "ack", "--consumer", "agent",
-                     "--cursor", result["next_cursor"]]) == 0
+    assert cli.run(["changes", "ack", "--consumer", "agent",
+                    "--cursor", result["next_cursor"]]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "ok"
-    assert cli.main(["changes", "reset", "--confirm"]) == 0
+    assert cli.run(["changes", "reset", "--confirm"]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "reset"
 
 
-def test_mcp_sync_defaults_and_partial_result(collecting_client, monkeypatch, tmp_path):
-    client, _ = collecting_client
-    session = SessionStore(tmp_path / "session.json")
-    session.save(AuthSession(mobile_binding="synthetic-binding"))
-    received = []
-
-    def collect(*args):
-        received.append(args)
-        result = batch()
-        result["errors"] = [{"source": "calendar", "child_id": "one", "code": "fetch_failed"}]
-        return result
-
-    monkeypatch.setattr(client, "collect_changes", collect)
-    server = create_server(session, lambda _: client)
+def test_mcp_sync_defaults_and_partial_result(tracking_hub, bound_store, monkeypatch):
+    sleeps = []
+    monkeypatch.setattr("infomentor_mcp.changes.tracker.time.sleep", sleeps.append)
+    tracking_hub.route(NEWS, news_items(attachment=True))
+    tracking_hub.route(CALENDAR, lambda request, child: httpx.Response(503))
+    tracking_hub.route(DOWNLOAD, lambda request, child: httpx.Response(200, content=b"PK"),
+                       method="GET")
+    server = McpApp(InfoMentorService(bound_store)).build()
     result = asyncio.run(server.call_tool("sync_changes", {})).structured_content
     assert result["status"] == "partial"
-    assert received[0][0] == ["news", "calendar"]
-    assert received[0][-2:] == (True, 1.0)
+    assert [(e["child_id"], e["source"]) for e in result["errors"]] == [
+        ("one", "calendar"), ("two", "calendar"),
+    ]
+    assert tracking_hub.read_by(DOWNLOAD) == ["one", "two"]  # Attachments by default.
+    assert sleeps and all(0 < delay <= 1.0 for delay in sleeps)  # Paced by default.
 
 
-def test_invalid_sources_delay_and_dates_make_no_requests(collecting_client):
-    client, log = collecting_client
+def test_invalid_sources_delay_and_dates_make_no_requests(tracking_hub, tracker):
     for sources, start, end, delay in [
-        ([], date(2026, 1, 1), date(2026, 1, 2), 1),
-        (["notifications"], date(2026, 1, 1), date(2026, 1, 2), 1),
+        ([], *DAYS, 1),
+        (["notifications"], *DAYS, 1),
         (["news"], date(2026, 1, 2), date(2026, 1, 1), 1),
-        (["news"], date(2026, 1, 1), date(2026, 1, 2), float("nan")),
+        (["news"], *DAYS, float("nan")),
     ]:
         with pytest.raises(ValueError):
-            client.collect_changes(sources, None, start, end, request_delay_seconds=delay)
-    assert not log
+            tracker.collect(sources, None, start, end, request_delay_seconds=delay)
+    assert not tracking_hub.httpx_mock.get_requests()
 
 
-def test_binding_mismatch_is_rejected_before_network(collecting_client, tmp_path):
-    client, log = collecting_client
-    store = ChangeStore(tmp_path / "changes.sqlite3")
+def test_binding_mismatch_is_rejected_before_network(tracking_hub, tracker):
     original = batch()
     original["binding"] = "different-authorization"
-    store.record(original)
+    tracker.changes.record(original)
     with pytest.raises(ChangeTrackingError) as error:
-        sync(client, store)
+        tracker.sync()
     assert error.value.code == "tracking_reset_required"
-    assert not log
+    assert not tracking_hub.httpx_mock.get_requests()
 
 
-def test_http_collection_and_disabled_includes(collecting_client, monkeypatch, httpx_mock):
-    client, log = collecting_client
-    monkeypatch.setattr(client, "_get_selected_child_news",
-                        InfoMentorClient._get_selected_child_news.__get__(client))
-    monkeypatch.setattr(client, "_get_selected_child_calendar",
-                        InfoMentorClient._get_selected_child_calendar.__get__(client))
-    monkeypatch.setattr(client, "_enrich_news", lambda *_: pytest.fail("Attachments disabled"))
-    for _ in range(2):
-        httpx_mock.add_response(
-            url="https://hub.infomentor.se/Communication/News/GetNewsList",
-            json={"items": [{"id": "post", "title": "News", "content": "Synthetic"}]},
-        )
-        httpx_mock.add_response(
-            url="https://hub.infomentor.se/calendarv2/calendarv2/getentries", json=[],
-        )
-    result = client.collect_changes(["news", "calendar"], None,
-                                    date(2026, 1, 1), date(2026, 1, 2), False, 0)
+def test_http_collection_and_disabled_includes(tracking_hub, tracker):
+    tracking_hub.route(NEWS, news_items(attachment=True))
+    tracking_hub.route(CALENDAR, lambda request, child: [])
+    result = tracker.collect(["news", "calendar"], None, *DAYS, False, 0)
     assert not result["errors"] and len(result["snapshots"]) == 4
     assert result["snapshots"][0]["items"][0]["title"] == "News"
-    assert log == ["discover", "select:one", "select:two", "select:one"]
+    assert result["snapshots"][0]["items"][0]["attachments"][0]["status"] == "available"
+    assert not result["attachment_checks"]
+    assert not tracking_hub.requests(DOWNLOAD)
 
 
 def test_extraction_budget_changes_are_not_content_changes(tmp_path):

@@ -2,15 +2,11 @@ import json
 
 import pytest
 
-import infomentor_mcp.cli as cli
-from infomentor_mcp.auth.mobile import (
-    DISCOVERY_PATH,
-    MobileDiscoveryError,
-    discover_mobile_auth,
-    inspect_endpoint,
-)
-from infomentor_mcp.auth.session import AuthSession, SessionStore, StoredCookie
-from infomentor_mcp.client.http import HUB_ORIGIN, InfoMentorHttpClient
+from infomentor_mcp.app.cli import main
+from infomentor_mcp.auth.discovery import DISCOVERY_PATH, EndpointMetadata, MobileDiscovery
+from infomentor_mcp.errors import MobileDiscoveryError
+from infomentor_mcp.hub.transport import HUB_ORIGIN, HubTransport
+from infomentor_mcp.storage.session import AuthSession, SessionStore, StoredCookie
 
 SYNTHETIC_PAYLOAD = {
     "apiUrl": "https://api.infomentor.se/NA1/",
@@ -27,9 +23,9 @@ SYNTHETIC_PAYLOAD = {
 
 def test_discovery_projects_only_metadata_and_never_contacts_returned_urls(httpx_mock):
     httpx_mock.add_response(url=HUB_ORIGIN + DISCOVERY_PATH, json=SYNTHETIC_PAYLOAD)
-    http = InfoMentorHttpClient()
+    http = HubTransport()
     try:
-        report = discover_mobile_auth(http)
+        report = MobileDiscovery(http).run()
     finally:
         http.close()
     serialized = report.model_dump_json()
@@ -59,7 +55,7 @@ def test_discovery_projects_only_metadata_and_never_contacts_returned_urls(httpx
     None,
 ])
 def test_unapproved_addresses_are_not_echoed_or_accepted(url):
-    metadata = inspect_endpoint(url)
+    metadata = EndpointMetadata.inspect(url)
     assert not metadata.valid_first_party_https
     assert metadata.origin is None
     assert "secret" not in metadata.model_dump_json()
@@ -73,10 +69,10 @@ def test_failed_discovery_does_not_follow_redirects_retry_or_echo_payload(httpx_
         headers={"location": "https://unapproved.example/secret-token"},
         text="secret-response",
     )
-    http = InfoMentorHttpClient()
+    http = HubTransport()
     try:
         with pytest.raises(MobileDiscoveryError) as error:
-            discover_mobile_auth(http)
+            MobileDiscovery(http).run()
         assert "secret" not in str(error.value)
         assert error.value.http_status == status
         assert len(httpx_mock.get_requests()) == 1
@@ -87,10 +83,10 @@ def test_failed_discovery_does_not_follow_redirects_retry_or_echo_payload(httpx_
 @pytest.mark.parametrize("body", ["", "<html>secret-login</html>", "null", "[]", '"secret"'])
 def test_unexpected_discovery_bodies_are_not_echoed(httpx_mock, body):
     httpx_mock.add_response(text=body)
-    http = InfoMentorHttpClient()
+    http = HubTransport()
     try:
         with pytest.raises(MobileDiscoveryError) as error:
-            discover_mobile_auth(http)
+            MobileDiscovery(http).run()
         assert "secret" not in str(error.value)
     finally:
         http.close()
@@ -98,9 +94,9 @@ def test_unexpected_discovery_bodies_are_not_echoed(httpx_mock, body):
 
 def test_partial_object_is_reported_without_claiming_support(httpx_mock):
     httpx_mock.add_response(json={"clientId": "secret-client-id"})
-    http = InfoMentorHttpClient()
+    http = HubTransport()
     try:
-        report = discover_mobile_auth(http)
+        report = MobileDiscovery(http).run()
         assert not report.complete_expected_shape
         assert "apiUrl" in report.missing_fields
         assert "secret" not in report.model_dump_json()
@@ -109,7 +105,7 @@ def test_partial_object_is_reported_without_claiming_support(httpx_mock):
 
 
 def test_cli_requires_existing_session_without_starting_login(httpx_mock, capsys):
-    assert cli.main(["auth", "mobile-discover"]) == 1
+    assert main(["auth", "mobile-discover"]) == 1
     assert "No saved session" in capsys.readouterr().out
     assert not httpx_mock.get_requests()
 
@@ -126,7 +122,7 @@ def test_cli_checks_hub_first_and_preserves_only_rotated_cookies(httpx_mock, cap
         method="POST", url=HUB_ORIGIN + DISCOVERY_PATH, json=SYNTHETIC_PAYLOAD,
         headers={"set-cookie": "IMHome=rotated-cookie; Path=/; Secure"},
     )
-    assert cli.main(["auth", "mobile-discover"]) == 0
+    assert main(["auth", "mobile-discover"]) == 0
     output = capsys.readouterr().out
     assert "secret" not in output
     assert "cookie" not in output
@@ -145,7 +141,7 @@ def test_cli_does_not_probe_discovery_on_expired_session(httpx_mock, capsys):
         status_code=302,
         headers={"location": "https://hub.infomentor.se/secret-path?token=secret-token"},
     )
-    assert cli.main(["auth", "mobile-discover"]) == 1
+    assert main(["auth", "mobile-discover"]) == 1
     output = capsys.readouterr().out
     assert "authentication_required" in output
     assert "secret" not in output

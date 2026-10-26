@@ -1,163 +1,412 @@
-"""Experimental Hub mobile discovery, without device pairing or OAuth exchange.
+"""Hub app authorization: explicit pairing, guarded renewal, tests and revocation.
 
-The single candidate request is documented in family-mcp's Android Hub static
-analysis. Discovery has been verified with Swedish BankID; this module itself
-never performs the separate experimental pairing flow.
-Only a deliberately allowlisted metadata projection may leave this module.
+Only the Swedish discovery-verified origins are contacted. No push registration
+or school-record writes are performed. Explicit login includes mobile setup;
+renew() only restores an existing, bound authorization without creating a grant.
 """
 
 from __future__ import annotations
 
-import re
-from urllib.parse import urlsplit
+import hashlib
+import json
+import time
+from datetime import UTC, datetime
+from urllib.parse import parse_qs, urlsplit
+from uuid import uuid4
 
-from pydantic import BaseModel
+import httpx
 
-from infomentor_mcp.client.http import HUB_ORIGIN, InfoMentorError, InfoMentorHttpClient
+from infomentor_mcp.auth.discovery import DISCOVERY_PATH
+from infomentor_mcp.auth.saml import SamlFlow
+from infomentor_mcp.errors import AuthenticationExpiredError, MobileFlowError
+from infomentor_mcp.hub.pupils import parse_child_ids
+from infomentor_mcp.hub.transport import HUB_ORIGIN, HubTransport
+from infomentor_mcp.storage.credentials import MobileCredentials, MobileCredentialStore
+from infomentor_mcp.storage.session import AuthSession, SessionStore
 
-DISCOVERY_PATH = "/account/pair/GetAuthenticationData"
-URL_FIELDS = ("apiUrl", "authenticationUrl", "tokenUrl", "revokeRefreshTokenUrl")
-EXPECTED_FIELDS = (*URL_FIELDS, "clientId", "expirationTime")
-# Only fixed paths documented in the app reference can be printed. Unknown
-# paths might embed an authorization reference and are never echoed.
-SAFE_PATHS = {
-    "", "/", "/NA1", "/NA1/", "/NA1/Authentication/sso",
-    "/Authentication/Authentication/LoginOAuth2", "/Authentication/OAuth2/Token",
+AUTH_ORIGIN = "https://im.infomentor.se"
+API_ORIGIN = "https://api-im.infomentor.se"
+AUTH_PATH = "/Authentication/Authentication/LoginOAuth2"
+TOKEN_PATH = "/Authentication/OAuth2/Token"
+REVOKE_PATH = "/Authentication/OAuth2/RevokeRefreshToken"
+SSO_BRIDGE_PATH = "/NA1/Authentication/sso"
+CALLBACK = "InfomentorNotification://oauth2Callback"
+CLIENT_ID = "notificationapp"
+SCOPE = "IM2-API-NOTIFICATION"
+KNOWN_OAUTH_ERRORS = {
+    "invalid_grant", "invalid_token", "invalid_request", "invalid_client",
+    "unauthorized_client", "access_denied", "invalid_refresh_token",
 }
 
 
-class MobileDiscoveryError(InfoMentorError):
-    """A metadata-only error; never include upstream payloads or URLs."""
+class MobileAuthorization:
+    """Explicit authorization plus guarded reuse of a bound mobile credential.
 
-    def __init__(self, code: str, message: str, http_status: int | None = None) -> None:
-        super().__init__(message)
-        self.code = code
-        self.http_status = http_status
-
-
-class EndpointMetadata(BaseModel):
-    """Display-only URL assessment, not authorization to contact this origin."""
-
-    valid_first_party_https: bool
-    origin: str | None = None
-    path: str | None = None
-    path_redacted: bool = False
-    query_present: bool = False
-    reason: str | None = None
-
-
-class MobileDiscoveryReport(BaseModel):
-    """Safe diagnostics: no client ID, expiration value, GUID, or token values."""
-
-    experimental: bool = True
-    http_status: int
-    response_field_count: int
-    recognized_fields: list[str]
-    missing_fields: list[str]
-    unknown_field_count: int
-    nonempty_client_id_present: bool
-    expiration_value_present: bool
-    endpoints: dict[str, EndpointMetadata]
-    complete_expected_shape: bool
-    pairing_attempted: bool = False
-    token_exchange_attempted: bool = False
-    discovered_urls_requested: bool = False
-
-
-def inspect_endpoint(value: object) -> EndpointMetadata:
-    """Assess a returned address without contacting it or exposing its secrets."""
-    if not isinstance(value, str) or not value or any(
-        char.isspace() or ord(char) < 32 or ord(char) == 127 for char in value
-    ):
-        return EndpointMetadata(valid_first_party_https=False, reason="invalid_url")
-    try:
-        parsed = urlsplit(value)
-        host = parsed.hostname or ""
-        port = parsed.port
-    except ValueError:
-        return EndpointMetadata(valid_first_party_https=False, reason="invalid_url")
-    if (
-        parsed.scheme != "https"
-        or parsed.username is not None
-        or parsed.password is not None
-        or port not in {None, 443}
-        or parsed.fragment
-        or "\\" in value
-        or not (host == "infomentor.se" or host.endswith(".infomentor.se"))
-        or any(
-            re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) is None
-            for label in host.split(".")
-        )
-    ):
-        return EndpointMetadata(valid_first_party_https=False, reason="unapproved_url")
-    # No discovered address is followed, even if this display-only check passes.
-    safe_path = parsed.path in SAFE_PATHS
-    return EndpointMetadata(
-        valid_first_party_https=True,
-        origin=f"https://{host}",
-        path=parsed.path if safe_path else None,
-        path_redacted=not safe_path,
-        query_present=bool(parsed.query),
-    )
-
-
-def discover_mobile_auth(http: InfoMentorHttpClient) -> MobileDiscoveryReport:
-    """Make exactly one empty-body candidate request; never follow redirects.
-
-    The caller must hold the shared session lock and first verify the existing
-    web session. Discovery may allocate a temporary upstream authGuid; this
-    function neither returns it nor persists the raw response.
+    The caller holds the session lock for every operation.
     """
-    response = http.client.post(
-        f"{HUB_ORIGIN}{DISCOVERY_PATH}",
-        content=b"",
-        headers={"Accept": "application/json", "X-Requested-With": "XMLHttpRequest"},
-        follow_redirects=False,
-    )
-    status = response.status_code
-    if response.is_redirect or status == 401:
-        raise MobileDiscoveryError(
-            "authentication_required", "Discovery requires a valid Hub session; run auth login.",
-            status,
+
+    def __init__(self, store: SessionStore) -> None:
+        self.store = store
+        self.tokens = MobileCredentialStore(store)
+        # Separate transport: no guardian web cookies, no redirect following.
+        self.transport = httpx.Client(follow_redirects=False, timeout=20)
+
+    def __enter__(self) -> MobileAuthorization:
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
+
+    def close(self) -> None:
+        self.transport.close()
+
+    def complete_login(self) -> None:
+        """Bind mobile access after an explicitly requested, fresh BankID login.
+
+        Never rebind an old grant: matching children do not prove guardian identity.
+        Existing credentials must pass revocation/cleanup before replacement.
+        """
+        credentials = self.tokens.load()
+        if credentials is None:
+            self.pair()
+            return
+        session = self.store.load()
+        if session is None:
+            raise MobileFlowError("No verified web session is stored.")
+        with HubTransport(session) as web:
+            web.verify_authenticated_read()
+            if self._children_fingerprint(web) != credentials.children_fingerprint:
+                raise MobileFlowError(
+                    "Existing mobile authorization has a different child scope; retained. "
+                    "Revoke it explicitly before logging in to this account again."
+                )
+        if not credentials.revocation_acknowledged:
+            try:
+                # Refresh only to obtain bearer access for revocation, never to
+                # transplant the old guardian's Hub session into the new login.
+                self._refresh(credentials)
+            except AuthenticationExpiredError as error:
+                if error.http_status not in {400, 401}:
+                    raise
+        self.revoke()
+        self.pair()
+
+    def pair(self) -> None:
+        if self.tokens.load() is not None:
+            raise MobileFlowError(
+                "Mobile credentials already exist; revoke them before pairing again."
+            )
+        session = self.store.load()
+        if session is None:
+            raise MobileFlowError("No saved web session; run auth login first.")
+        with HubTransport(session) as web:
+            web.verify_authenticated_read()
+            fingerprint = self._children_fingerprint(web)
+            guid = self._authorization_reference(web)
+            device_id = str(uuid4())
+            response = self.transport.get(AUTH_ORIGIN + AUTH_PATH, params={
+                "authGuid": guid,
+                "DeviceIdentifier": device_id,
+                "DeviceFriendlyName": "InfoMentor MCP (experimental local client)",
+                "DevicePlatform": "Android",
+                "scope": SCOPE, "redirect_uri": CALLBACK,
+                "client_id": CLIENT_ID, "response_type": "code", "isSandBox": "false",
+            })
+            self._require_status(response, 302, "app authorization")
+            code = self._authorization_code(response)
+            pending = MobileCredentials(
+                access_token="pending", refresh_token="pending", device_id=device_id,
+                binding=str(uuid4()), children_fingerprint=fingerprint,
+            )
+            response = self.transport.post(AUTH_ORIGIN + TOKEN_PATH, data={
+                "code": code, "client_id": CLIENT_ID, "client_secret": "NONE",
+                "redirect_uri": CALLBACK, "grant_type": "authorization_code",
+            })
+            credentials = self._read_tokens(response, pending)
+            # Save immediately: later verification failures must not strand a
+            # granted credential without a local revocation path.
+            self.tokens.save(credentials)
+            verified_web = web.session()
+            verified_web.mobile_binding = credentials.binding
+            self.store.save(verified_web)
+            self._restore_hub(credentials)
+
+    def test(self, *, refresh: bool = False, after_expiry: bool = False) -> None:
+        credentials = self.tokens.load()
+        if credentials is None:
+            raise MobileFlowError("No paired mobile credentials exist.")
+        session = self.store.load()
+        if session is None or session.mobile_binding != credentials.binding:
+            raise MobileFlowError(
+                "Current web session is not bound to this pairing; refusing replacement."
+            )
+        if after_expiry:
+            self._await_access_expiry(credentials)
+            refresh = True
+        if refresh:
+            credentials = self._refresh(credentials)
+        self._restore_hub(credentials)
+
+    def renew(self) -> AuthSession:
+        """Restore an existing, bound pairing without printing or creating a grant."""
+        with self.store.locked():
+            credentials = self.tokens.load()
+            session = self.store.load()
+            if credentials is None or session is None:
+                raise AuthenticationExpiredError(
+                    "Missing mobile/web session; explicit login is required."
+                )
+            if session.mobile_binding != credentials.binding:
+                raise AuthenticationExpiredError(
+                    "Mobile authorization is not bound to this login; refusing session replacement."
+                )
+            if credentials.revocation_acknowledged:
+                raise AuthenticationExpiredError(
+                    "Mobile authorization has a pending revocation; "
+                    "complete it before reauthorizing."
+                )
+            return self._restore_hub(credentials, refresh_on_unauthorized=True)
+
+    def revoke(self) -> None:
+        credentials = self.tokens.load()
+        if credentials is None:
+            raise MobileFlowError("No paired mobile credentials exist.")
+        if not credentials.revocation_acknowledged:
+            response = self.transport.get(AUTH_ORIGIN + REVOKE_PATH, params={
+                "refreshToken": credentials.refresh_token.get_secret_value(),
+            }, headers=credentials.bearer())
+            if response.status_code not in {200, 204, 400, 401}:
+                raise MobileFlowError(
+                    f"Revocation failed (HTTP {response.status_code}); local credentials retained."
+                )
+            if response.status_code in {200, 204} and response.content.strip():
+                try:
+                    result = response.json()
+                except ValueError:
+                    raise MobileFlowError(
+                        "Revocation response is ambiguous; credentials retained."
+                    ) from None
+                if result is not True:
+                    raise MobileFlowError("Revocation was not confirmed; credentials retained.")
+            if response.status_code in {200, 204}:
+                credentials.revocation_acknowledged = True
+                self.tokens.save(credentials)
+        # A successful revoke response alone is not proof. Repeated revocation
+        # can also return 400/401 for an already unusable credential. Check that the old
+        # refresh token is now rejected. If it unexpectedly rotates, preserve
+        # the replacement so the newly granted credential is not stranded.
+        check = self._refresh_request(credentials)
+        if check.status_code == 200:
+            self.tokens.save(self._read_tokens(check, credentials))
+            raise MobileFlowError("Revoked token still renewed; rotated credentials retained.")
+        try:
+            rejected = check.json().get("error")
+        except (ValueError, AttributeError):
+            rejected = None
+        confirmed_rejection = (
+            rejected == "invalid_grant"
+            or not check.content.strip()
+            or (check.status_code == 400 and check.content.strip().lower() == b"bad request")
         )
-    if status != 200:
-        raise MobileDiscoveryError(
-            "discovery_http_error",
-            "Discovery did not return HTTP 200; no retries or alternate paths were attempted.",
-            status,
+        if check.status_code not in {400, 401} or not confirmed_rejection:
+            raise MobileFlowError(
+                "Revocation effectiveness is inconclusive "
+                f"(HTTP {check.status_code}); credentials retained."
+            )
+        self.tokens.clear_after_revocation()
+
+    def _await_access_expiry(self, credentials: MobileCredentials) -> None:
+        """Wait out the advertised access-token lifetime and require Hub to reject it."""
+        if credentials.expires_in is None or not 0 < credentials.expires_in <= 86400:
+            raise MobileFlowError(
+                "No supported access-token expiry available for an unattended test."
+            )
+        age = (datetime.now(UTC) - credentials.received_at).total_seconds()
+        delay = max(0, credentials.expires_in - age) + 5
+        print(
+            f"Waiting {int(delay) + 1} seconds for advertised access-token expiry; "
+            "the session lock remains held. No keepalive requests will be made.",
+            flush=True,
         )
-    if not response.content.strip():
-        raise MobileDiscoveryError("empty_response", "Discovery returned an empty body.", status)
-    try:
-        payload = response.json()
-    except ValueError:
-        raise MobileDiscoveryError(
-            "unexpected_response", "Discovery did not return JSON; body withheld.", status
-        ) from None
-    if not isinstance(payload, dict):
-        raise MobileDiscoveryError(
-            "unexpected_response", "Discovery JSON was not an object; body withheld.", status
+        time.sleep(delay)
+        response = self.transport.get(API_ORIGIN + SSO_BRIDGE_PATH, headers=credentials.bearer())
+        if response.status_code != 401:
+            raise MobileFlowError(
+                "Expiry test inconclusive: old access token returned "
+                f"HTTP {response.status_code}, not 401; no expiry-renewal claim made."
+            )
+        print("Expired access token rejected with HTTP 401; testing refresh grant.", flush=True)
+
+    def _refresh_request(self, credentials: MobileCredentials) -> httpx.Response:
+        return self.transport.post(AUTH_ORIGIN + TOKEN_PATH, data={
+            "refresh_token": credentials.refresh_token.get_secret_value(),
+            "client_id": CLIENT_ID, "client_secret": "NONE",
+            "grant_type": "refresh_token", "scope": SCOPE,
+        })
+
+    def _refresh(self, credentials: MobileCredentials) -> MobileCredentials:
+        response = self._refresh_request(credentials)
+        if response.status_code in {400, 401}:
+            raise AuthenticationExpiredError(
+                "Stored mobile authorization was rejected; "
+                "explicit BankID reauthorization is required.",
+                http_status=response.status_code,
+            )
+        rotated = self._read_tokens(response, credentials)
+        self.tokens.save(rotated)
+        return rotated
+
+    def _restore_hub(
+        self, credentials: MobileCredentials, *, refresh_on_unauthorized: bool = False
+    ) -> AuthSession:
+        """Exchange bearer access for a fresh, verified Hub web session of the same scope."""
+        response = self.transport.get(API_ORIGIN + SSO_BRIDGE_PATH, headers=credentials.bearer())
+        if response.status_code == 401 and refresh_on_unauthorized:
+            credentials = self._refresh(credentials)
+            response = self.transport.get(
+                API_ORIGIN + SSO_BRIDGE_PATH, headers=credentials.bearer(),
+            )
+            if response.status_code == 401:
+                raise AuthenticationExpiredError(
+                    "Mobile access was rejected after one refresh; "
+                    "explicit reauthorization is required.",
+                    http_status=401,
+                )
+        self._require_status(response, 200, "mobile SSO bridge")
+        url = self._approved_sign_in_url(response)
+        with HubTransport() as web:
+            # Never forward a bearer token into the web sign-in redirect chain.
+            SamlFlow(web, emit_diagnostics=False).follow(web.request_auth("GET", url))
+            web.verify_authenticated_read()
+            if self._children_fingerprint(web) != credentials.children_fingerprint:
+                raise MobileFlowError(
+                    "New Hub session has a different linked-child scope; not saved."
+                )
+            session = web.session()
+            session.mobile_binding = credentials.binding
+            self.store.save(session)
+            credentials.verified = True
+            self.tokens.save(credentials)
+            return session
+
+    @staticmethod
+    def _require_status(response: httpx.Response, status: int, stage: str) -> None:
+        if response.status_code == status:
+            return
+        try:
+            error = response.json().get("error")
+        except (ValueError, AttributeError):
+            error = None
+        kind = error if isinstance(error, str) and error in KNOWN_OAUTH_ERRORS else (
+            "unrecognized_or_absent"
         )
-    recognized = [name for name in EXPECTED_FIELDS if name in payload]
-    endpoints = {
-        name: inspect_endpoint(payload[name]) for name in URL_FIELDS if name in payload
-    }
-    client_id_present = (
-        isinstance(payload.get("clientId"), str) and bool(payload["clientId"].strip())
-    )
-    expiration_present = payload.get("expirationTime") is not None
-    missing = [name for name in EXPECTED_FIELDS if name not in payload]
-    return MobileDiscoveryReport(
-        http_status=status,
-        response_field_count=len(payload),
-        recognized_fields=recognized,
-        missing_fields=missing,
-        unknown_field_count=len(payload) - len(recognized),
-        nonempty_client_id_present=client_id_present,
-        expiration_value_present=expiration_present,
-        endpoints=endpoints,
-        complete_expected_shape=(
-            not missing and client_id_present and expiration_present
-            and all(endpoint.valid_first_party_https for endpoint in endpoints.values())
-        ),
-    )
+        raise MobileFlowError(
+            f"Mobile flow stopped at {stage} (HTTP {response.status_code}, OAuth error: {kind})."
+        )
+
+    def _children_fingerprint(self, web: HubTransport) -> str:
+        response = web.client.get(HUB_ORIGIN + "/", follow_redirects=False)
+        self._require_status(response, 200, "child-scope verification")
+        child_ids = sorted(parse_child_ids(response.text))
+        if not child_ids:
+            raise MobileFlowError("Cannot establish the linked-child scope; stopping mobile flow.")
+        return hashlib.sha256(json.dumps(child_ids).encode()).hexdigest()
+
+    def _authorization_reference(self, web: HubTransport) -> str:
+        """Check Hub's discovery against the verified Swedish app configuration."""
+        response = web.client.post(HUB_ORIGIN + DISCOVERY_PATH, content=b"", follow_redirects=False)
+        self._require_status(response, 200, "discovery")
+        try:
+            payload = response.json()
+            expected = {
+                "authenticationUrl": (AUTH_ORIGIN, AUTH_PATH),
+                "tokenUrl": (AUTH_ORIGIN, TOKEN_PATH),
+                "revokeRefreshTokenUrl": (AUTH_ORIGIN, REVOKE_PATH),
+                "apiUrl": (API_ORIGIN, ""),
+            }
+            for name, (origin, path) in expected.items():
+                parsed = urlsplit(payload[name])
+                if (
+                    f"{parsed.scheme}://{parsed.netloc}" != origin
+                    or parsed.fragment
+                    or parsed.path.rstrip("/") != path
+                ):
+                    raise ValueError("Unexpected endpoint")
+            if payload["clientId"] != CLIENT_ID:
+                raise ValueError("Unexpected client")
+            guids = parse_qs(urlsplit(payload["authenticationUrl"]).query).get("authGuid", [])
+            if len(guids) != 1 or not guids[0]:
+                raise ValueError("Missing authorization reference")
+            return guids[0]
+        except (ValueError, TypeError, KeyError, AttributeError):
+            raise MobileFlowError(
+                "Discovery did not match the verified Swedish app configuration."
+            ) from None
+
+    @staticmethod
+    def _authorization_code(response: httpx.Response) -> str:
+        try:
+            callback = urlsplit(response.headers["location"])
+            query = parse_qs(callback.query)
+            if (
+                callback.scheme != "infomentornotification"
+                or callback.netloc.lower() != "oauth2callback"
+                or callback.path not in {"", "/"}
+                or callback.fragment
+                or "error" in query
+                or len(query.get("code", [])) != 1
+            ):
+                raise ValueError("Unexpected callback")
+            return query["code"][0]
+        except (KeyError, ValueError):
+            raise MobileFlowError(
+                "App authorization did not return the expected code callback."
+            ) from None
+
+    def _read_tokens(
+        self, response: httpx.Response, previous: MobileCredentials,
+    ) -> MobileCredentials:
+        self._require_status(response, 200, "token exchange")
+        try:
+            payload = response.json()
+            access, refresh = payload["access_token"], payload["refresh_token"]
+            if not all(isinstance(value, str) and value.strip() for value in (access, refresh)):
+                raise ValueError("Missing token")
+            if str(payload.get("token_type", "Bearer")).lower() != "bearer":
+                raise ValueError("Unexpected token type")
+            expires = payload.get("expires_in")
+            if expires is not None:
+                expires = int(expires)
+                if expires < 0:
+                    raise ValueError("Invalid expiry")
+            return MobileCredentials(
+                access_token=access, refresh_token=refresh,
+                device_id=previous.device_id, binding=previous.binding,
+                children_fingerprint=previous.children_fingerprint,
+                expires_in=expires, received_at=datetime.now(UTC), verified=False,
+            )
+        except (ValueError, TypeError, KeyError, AttributeError):
+            raise MobileFlowError("Token response was unexpected; body withheld.") from None
+
+    @staticmethod
+    def _approved_sign_in_url(response: httpx.Response) -> str:
+        try:
+            url = response.json()
+        except ValueError:
+            url = response.text.strip()
+        if not isinstance(url, str):
+            raise MobileFlowError("SSO bridge did not return a sign-in URL; response withheld.")
+        try:
+            parsed = urlsplit(url)
+            if (
+                parsed.scheme != "https"
+                or parsed.netloc not in {"im.infomentor.se", "infomentor.se", "hub.infomentor.se"}
+                or parsed.fragment or "\\" in url
+                or any(char.isspace() or ord(char) < 32 for char in url)
+            ):
+                raise ValueError("Unapproved sign-in origin")
+        except ValueError:
+            raise MobileFlowError(
+                "SSO bridge sign-in URL was not approved; not followed."
+            ) from None
+        return url

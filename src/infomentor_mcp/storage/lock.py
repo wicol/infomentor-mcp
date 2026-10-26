@@ -9,9 +9,7 @@ import threading
 import time
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
-
-_LOCKS: dict[Path, SessionLock] = {}
-_REGISTRY_LOCK = threading.Lock()
+from typing import ClassVar
 
 
 class SessionLockTimeout(Exception):
@@ -20,6 +18,17 @@ class SessionLockTimeout(Exception):
 
 class SessionLock:
     """Hold a permanent lock-file inode; the OS releases flock on process exit."""
+
+    _shared: ClassVar[dict[Path, SessionLock]] = {}
+    _shared_guard: ClassVar[threading.Lock] = threading.Lock()
+
+    @classmethod
+    def shared(cls, path: Path) -> SessionLock:
+        """Share one reentrant mutex across all stores for the same on-disk lock."""
+        with cls._shared_guard:
+            if path not in cls._shared:
+                cls._shared[path] = cls(path)
+            return cls._shared[path]
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -94,10 +103,3 @@ class SessionLock:
         finally:
             os.close(descriptor)
 
-
-def session_lock(path: Path) -> SessionLock:
-    """Share a reentrant mutex across all stores for the same on-disk lock."""
-    with _REGISTRY_LOCK:
-        if path not in _LOCKS:
-            _LOCKS[path] = SessionLock(path)
-        return _LOCKS[path]

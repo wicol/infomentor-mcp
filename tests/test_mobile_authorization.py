@@ -2,19 +2,19 @@ import re
 
 import pytest
 
-from infomentor_mcp.auth.mobile import DISCOVERY_PATH
-from infomentor_mcp.auth.mobile_credentials import MobileCredentials, MobileCredentialStore
-from infomentor_mcp.auth.mobile_pairing import (
+from infomentor_mcp.auth.discovery import DISCOVERY_PATH
+from infomentor_mcp.auth.mobile import (
     API_ORIGIN,
     AUTH_ORIGIN,
     AUTH_PATH,
     REVOKE_PATH,
     TOKEN_PATH,
-    MobileFlowError,
-    MobilePairing,
+    MobileAuthorization,
 )
-from infomentor_mcp.auth.session import AuthSession, SessionStore
-from infomentor_mcp.client.http import HUB_ORIGIN, AuthenticationExpiredError
+from infomentor_mcp.errors import AuthenticationExpiredError, MobileFlowError
+from infomentor_mcp.hub.transport import HUB_ORIGIN, HubTransport
+from infomentor_mcp.storage.credentials import MobileCredentials, MobileCredentialStore
+from infomentor_mcp.storage.session import AuthSession, SessionStore
 
 PAGE = "<script>var pupils = ['/Account/PupilSwitcher/SwitchPupil/synthetic-child'];</script>"
 DISCOVERY = {
@@ -59,7 +59,7 @@ def prepare_pairing(httpx_mock, *, callback=None, sign_in_origin=None):
 
 def test_pairing_persists_tokens_and_verifies_fresh_child_scope(httpx_mock):
     store = prepare_pairing(httpx_mock)
-    flow = MobilePairing(store)
+    flow = MobileAuthorization(store)
     try:
         flow.complete_login()
         credentials = flow.tokens.load()
@@ -92,15 +92,14 @@ def test_login_cleans_up_mobile_authorization_before_replacing(
 ):
     store = SessionStore()
     store.save(AuthSession())
-    flow = MobilePairing(store)
+    flow = MobileAuthorization(store)
     flow.tokens.save(MobileCredentials(
         access_token="access", refresh_token="refresh", device_id="device",
         binding="old-binding", children_fingerprint="scope",
     ))
-    monkeypatch.setattr("infomentor_mcp.auth.mobile_pairing.InfoMentorHttpClient.verify_authenticated_read",
-                        lambda _: 200)
-    monkeypatch.setattr("infomentor_mcp.auth.mobile_pairing._children_fingerprint",
-                        lambda _: "different" if outcome == "different_scope" else "scope")
+    monkeypatch.setattr(HubTransport, "verify_authenticated_read", lambda _: 200)
+    monkeypatch.setattr(MobileAuthorization, "_children_fingerprint",
+                        lambda self, web: "different" if outcome == "different_scope" else "scope")
     events = []
 
     def refresh(*args, **kwargs):
@@ -132,7 +131,7 @@ def test_login_cleans_up_mobile_authorization_before_replacing(
 ])
 def test_authorization_rejects_unexpected_callbacks_without_token_exchange(httpx_mock, callback):
     store = prepare_pairing(httpx_mock, callback=callback)
-    flow = MobilePairing(store)
+    flow = MobileAuthorization(store)
     try:
         with pytest.raises(MobileFlowError, match="code callback"):
             flow.pair()
@@ -144,7 +143,7 @@ def test_authorization_rejects_unexpected_callbacks_without_token_exchange(httpx
 
 def test_tokens_retained_for_revocation_when_sso_url_is_unapproved(httpx_mock):
     store = prepare_pairing(httpx_mock, sign_in_origin="https://evil.example")
-    flow = MobilePairing(store)
+    flow = MobileAuthorization(store)
     try:
         with pytest.raises(MobileFlowError, match="not approved"):
             flow.pair()
@@ -167,7 +166,7 @@ def test_refresh_rotation_saved_before_later_sso_failure(httpx_mock):
         "access_token": "rotated-access", "refresh_token": "rotated-refresh", "expires_in": 3600,
     })
     httpx_mock.add_response(url=API_ORIGIN + "/NA1/Authentication/sso", status_code=503)
-    flow = MobilePairing(store)
+    flow = MobileAuthorization(store)
     try:
         with pytest.raises(MobileFlowError, match="HTTP 503"):
             flow.test(refresh=True)
@@ -184,7 +183,7 @@ def test_mobile_tokens_cannot_replace_a_differently_bound_web_session(httpx_mock
         access_token="old-access", refresh_token="old-refresh", device_id="device",
         binding="different-login", children_fingerprint="fingerprint",
     ))
-    flow = MobilePairing(store)
+    flow = MobileAuthorization(store)
     try:
         with pytest.raises(MobileFlowError, match="not bound"):
             flow.test(refresh=True)
@@ -194,7 +193,7 @@ def test_mobile_tokens_cannot_replace_a_differently_bound_web_session(httpx_mock
 
 
 def test_expiry_test_requires_401_before_refresh(httpx_mock, monkeypatch):
-    monkeypatch.setattr("infomentor_mcp.auth.mobile_pairing.time.sleep", lambda _: None)
+    monkeypatch.setattr("infomentor_mcp.auth.mobile.time.sleep", lambda _: None)
     store = SessionStore()
     store.save(AuthSession(mobile_binding="binding"))
     tokens = MobileCredentialStore(store)
@@ -207,7 +206,7 @@ def test_expiry_test_requires_401_before_refresh(httpx_mock, monkeypatch):
         "access_token": "new-access", "refresh_token": "new-refresh", "expires_in": 600,
     })
     restored = []
-    flow = MobilePairing(store)
+    flow = MobileAuthorization(store)
     monkeypatch.setattr(flow, "_restore_hub", lambda credentials: restored.append(credentials))
     try:
         flow.test(after_expiry=True)
@@ -218,7 +217,7 @@ def test_expiry_test_requires_401_before_refresh(httpx_mock, monkeypatch):
 
 
 def test_still_valid_access_token_is_not_reported_as_expiry_refresh(httpx_mock, monkeypatch):
-    monkeypatch.setattr("infomentor_mcp.auth.mobile_pairing.time.sleep", lambda _: None)
+    monkeypatch.setattr("infomentor_mcp.auth.mobile.time.sleep", lambda _: None)
     store = SessionStore()
     store.save(AuthSession(mobile_binding="binding"))
     MobileCredentialStore(store).save(MobileCredentials(
@@ -226,7 +225,7 @@ def test_still_valid_access_token_is_not_reported_as_expiry_refresh(httpx_mock, 
         binding="binding", children_fingerprint="fingerprint", expires_in=600,
     ))
     httpx_mock.add_response(url=API_ORIGIN + "/NA1/Authentication/sso", status_code=200)
-    flow = MobilePairing(store)
+    flow = MobileAuthorization(store)
     try:
         with pytest.raises(MobileFlowError, match="inconclusive"):
             flow.test(after_expiry=True)
@@ -251,7 +250,7 @@ def test_wrong_child_scope_does_not_replace_existing_session(httpx_mock):
         url=HUB_ORIGIN + "/timetable/timetable/appData", json={"items": []}
     )
     before = store.load().model_dump_json()
-    flow = MobilePairing(store)
+    flow = MobileAuthorization(store)
     try:
         with pytest.raises(MobileFlowError, match="different linked-child scope"):
             flow.test()
@@ -295,7 +294,7 @@ def test_revocation_preserves_unexpectedly_rotated_tokens(httpx_mock):
     httpx_mock.add_response(url=AUTH_ORIGIN + TOKEN_PATH, json={
         "access_token": "new-access", "refresh_token": "new-refresh", "expires_in": 600,
     })
-    flow = MobilePairing(store)
+    flow = MobileAuthorization(store)
     try:
         with pytest.raises(MobileFlowError, match="still renewed"):
             flow.revoke()
@@ -327,7 +326,7 @@ def test_revocation_only_clears_local_credentials_on_confirmation(
             url=AUTH_ORIGIN + TOKEN_PATH, status_code=400,
             text="Bad Request" if status == 400 else '{"error":"invalid_grant"}',
         )
-    flow = MobilePairing(store)
+    flow = MobileAuthorization(store)
     try:
         if removed:
             flow.revoke()

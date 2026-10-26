@@ -2,7 +2,7 @@ import multiprocessing
 
 import pytest
 
-from infomentor_mcp.auth.locking import SessionLock, SessionLockTimeout, session_lock
+from infomentor_mcp.storage.lock import SessionLock, SessionLockTimeout
 
 
 def _acquire_in_process(path, connection):
@@ -38,8 +38,8 @@ def test_process_waits_and_times_out_while_lock_is_held(tmp_path):
 
 
 def test_nested_store_operations_do_not_deadlock(tmp_path):
-    first = session_lock(tmp_path / "session.lock")
-    second = session_lock(tmp_path / "session.lock")
+    first = SessionLock.shared(tmp_path / "session.lock")
+    second = SessionLock.shared(tmp_path / "session.lock")
     with first.acquire(timeout=0), second.acquire(timeout=0):
         assert first is second
 

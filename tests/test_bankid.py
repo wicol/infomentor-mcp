@@ -2,13 +2,9 @@ import asyncio
 
 import pytest
 
-from infomentor_mcp.auth.stockholm_bankid import (
-    SSO_LOGIN_URL,
-    BankIdOrder,
-    StockholmBankId,
-    parse_login_page,
-)
-from infomentor_mcp.client.http import InfoMentorError, UnsafeRedirectError
+from infomentor_mcp.auth.bankid import BankIdOrder, StockholmBankId
+from infomentor_mcp.auth.saml import SSO_LOGIN_URL, LoginPage
+from infomentor_mcp.errors import InfoMentorError, UnsafeRedirectError
 
 GATEWAY = "https://login003.stockholm.se/auth"
 
@@ -21,7 +17,7 @@ def mock_begin(httpx_mock, payload, method="url"):
 
 
 def test_parses_interstitial_form_without_saml_fields() -> None:
-    page = parse_login_page(
+    page = LoginPage(
         '<html><body>Login in progress<form action="/continue">'
         '<input name="relay" value="value"></form></body></html>'
     )

@@ -11,8 +11,6 @@ from urllib.parse import urlsplit
 
 import qrcode
 
-from infomentor_mcp.auth.stockholm_bankid import BankIdOrder, StockholmBankId
-
 
 @dataclass(frozen=True)
 class WebQrOptions:
@@ -22,6 +20,8 @@ class WebQrOptions:
 
 
 class WebQr:
+    """A temporary page at an unguessable path that polls for the current QR frame."""
+
     def __init__(self, options: WebQrOptions) -> None:
         self.options = options
         self.server: asyncio.Server | None = None
@@ -71,7 +71,7 @@ class WebQr:
             self._hosts.add(host.lower())
         self.url = self.origin + self.path
 
-    def update(self, qr_data: str | None, status: str) -> None:
+    def show(self, qr_data: str | None, status: str) -> None:
         self.status = status
         if qr_data is None:
             self.matrix = None
@@ -107,7 +107,7 @@ class WebQr:
             ):
                 if path == self.path:
                     code, mime = 200, "text/html; charset=utf-8"
-                    body = _page(nonce).encode()
+                    body = self._page(nonce).encode()
                 elif path == self.path + "frame":
                     self.opened.set()
                     code, mime = 200, "application/json"
@@ -144,9 +144,9 @@ class WebQr:
             writer.close()
         await asyncio.gather(*(writer.wait_closed() for writer in writers), return_exceptions=True)
 
-
-def _page(nonce: str) -> str:
-    return f"""<!doctype html><html lang="sv"><meta charset="utf-8">
+    @staticmethod
+    def _page(nonce: str) -> str:
+        return f"""<!doctype html><html lang="sv"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>InfoMentor BankID</title><style>
 body{{font:18px system-ui;text-align:center;margin:2rem}} canvas{{width:min(90vw,450px)}}
@@ -169,18 +169,3 @@ async function tick(){{try{{
 }}catch(e){{document.querySelector('#status').textContent=
 'Visningen är stängd. Kontrollera inloggningsstatus.';
 ctx.clearRect(0,0,600,600);}}}}tick();</script></html>"""
-
-
-async def wait_for_approval(protocol: StockholmBankId, order: BankIdOrder, view: WebQr):
-    view.update(order.qr_data, "waiting")
-    last = order.qr_data
-    async with asyncio.timeout(240):
-        while True:
-            await asyncio.sleep(1)
-            status = await protocol.poll(order)
-            if status.state == "OK":
-                view.update(None, "verifying")
-                return await protocol.finish(order)
-            last = status.qr_data or last
-            view.update(last,
-                        "user_sign" if status.state == "USER_SIGN" else "waiting")

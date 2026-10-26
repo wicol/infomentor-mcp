@@ -1,9 +1,9 @@
 import httpx
 import pytest
 
-from infomentor_mcp.auth.measurement import MeasurementLog, measure_session
-from infomentor_mcp.auth.session import AuthSession
-from infomentor_mcp.client.http import AuthenticationExpiredError, InfoMentorError
+from infomentor_mcp.auth.measurement import MeasurementLog, SessionLifetimeProbe
+from infomentor_mcp.errors import AuthenticationExpiredError, InfoMentorError
+from infomentor_mcp.storage.session import AuthSession
 
 
 class Clock:
@@ -35,6 +35,9 @@ class FakeHttp:
     def session(self):
         return AuthSession.from_client(self.client)
 
+    def reset(self, session):
+        session.apply_to(self.client)
+
     def close(self):
         self.closed = True
         self.client.close()
@@ -52,7 +55,7 @@ class SsoLogin:
     def __init__(self, http, *, emit_diagnostics):
         assert emit_diagnostics is False
 
-    def resume_from_stockholm_sso(self):
+    def resume_stockholm_sso(self):
         return True
 
 
@@ -63,11 +66,11 @@ def test_active_probe_records_expiry_bounds_and_renews_once():
     renewal = FakeHttp([None])
     store = Store()
     try:
-        result = measure_session(
+        result = SessionLifetimeProbe(
             http, store, records.append, interval=120, duration=360,
             clock=clock.read, sleep=clock.sleep,
             http_factory=lambda session: renewal, login_factory=SsoLogin,
-        )
+        ).run()
         assert result == "duration_reached"
         expiry = next(item for item in records if item["event"] == "hub_authentication_failed")
         assert expiry["hub_lifetime_lower_seconds"] == 120
@@ -86,10 +89,10 @@ def test_idle_probe_waits_without_keepalive_requests():
     records = []
     http = FakeHttp([None])
     try:
-        result = measure_session(
+        result = SessionLifetimeProbe(
             http, Store(), records.append, idle=3600, duration=7200,
             clock=clock.read, sleep=clock.sleep,
-        )
+        ).run()
         assert result == "idle_check_complete"
         assert clock.sleeps == [3600]
         assert [item["event"] for item in records] == [
@@ -101,7 +104,7 @@ def test_idle_probe_waits_without_keepalive_requests():
 
 def test_bankid_required_stops_without_starting_new_order():
     class ExpiredSso(SsoLogin):
-        def resume_from_stockholm_sso(self):
+        def resume_stockholm_sso(self):
             return False
 
     clock = Clock()
@@ -109,10 +112,10 @@ def test_bankid_required_stops_without_starting_new_order():
     renewal = FakeHttp([])
     records = []
     try:
-        result = measure_session(
+        result = SessionLifetimeProbe(
             http, Store(), records.append, clock=clock.read, sleep=clock.sleep,
             http_factory=lambda session: renewal, login_factory=ExpiredSso,
-        )
+        ).run()
         assert result == "bankid_required"
         assert records[-1]["event"] == "bankid_required"
         assert renewal.closed
@@ -134,9 +137,9 @@ def test_network_or_provider_errors_are_inconclusive_and_redacted(error):
     http = FakeHttp([error])
     records = []
     try:
-        result = measure_session(
+        result = SessionLifetimeProbe(
             http, Store(), records.append, clock=clock.read, sleep=clock.sleep,
-        )
+        ).run()
         assert result == "inconclusive"
         assert records[-1]["event"] == "inconclusive"
         assert "private" not in str(records)

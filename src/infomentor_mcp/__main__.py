@@ -1,3 +1,3 @@
-from infomentor_mcp.cli import main
+from infomentor_mcp.app.cli import main
 
 raise SystemExit(main())

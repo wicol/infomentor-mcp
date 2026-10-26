@@ -2,6 +2,10 @@
 
 import keyring.errors
 import pytest
+from fakehub import FakeHub
+
+from infomentor_mcp.hub.hub import Hub
+from infomentor_mcp.storage.session import AuthSession, SessionStore
 
 
 @pytest.fixture(autouse=True)
@@ -18,9 +22,30 @@ def isolated_session_storage(tmp_path, monkeypatch):
 
 @pytest.fixture
 def completed_mobile_login(monkeypatch):
-    def complete(flow):
-        session = flow.store.load()
+    def complete(authorization):
+        session = authorization.store.load()
         session.mobile_binding = "synthetic-bound-login"
-        flow.store.save(session)
+        authorization.store.save(session)
 
-    monkeypatch.setattr("infomentor_mcp.auth.mobile_pairing.MobilePairing.complete_login", complete)
+    monkeypatch.setattr(
+        "infomentor_mcp.auth.mobile.MobileAuthorization.complete_login", complete,
+    )
+
+
+@pytest.fixture
+def fake_hub(httpx_mock):
+    return FakeHub(httpx_mock)
+
+
+@pytest.fixture
+def store():
+    store = SessionStore()
+    store.save(AuthSession())
+    return store
+
+
+@pytest.fixture
+def hub(fake_hub, store):
+    """A Hub on the simulated InfoMentor, without session renewal."""
+    with Hub(store) as hub:
+        yield hub

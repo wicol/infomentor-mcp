@@ -15,6 +15,24 @@ uv run ruff check .
 
 Tests use mocked HTTP and never require a real account. If you add a new
 upstream request, cover both the success shape and a failure/no-auth shape.
+Feature tests run against `tests/fakehub.py`, a simulated Hub with server-side
+pupil selection; assert which pupil was selected for each read rather than
+patching private methods.
+
+## Layout
+
+Dependencies point downwards only:
+
+- `app/`: `Cli`, `McpApp` and the `InfoMentorService` they share (locking,
+  hub lifecycle, sanitized error responses).
+- `features/` and `changes/`: `News`, `Calendar`, `Timetable`, `Childcare`,
+  `ChildcareWriter`, `Notifications`, `ChangeTracker` and `ChangeStore`.
+- `login/`: interactive BankID presentation (terminal, web QR, MCP attempts).
+- `auth/`: BankID/SAML protocols, mobile authorization and session renewal.
+- `hub/`: `Hub` (lock, refresh, renewal, persistence), `PupilSwitcher` and
+  `HubTransport`.
+- `storage/`: the session lock, web session and mobile credentials.
+- `models.py` (parsed fail-closed via `from_hub`) and `errors.py` (stable codes).
 
 ## Ground rules
 
@@ -29,7 +47,7 @@ upstream request, cover both the success shape and a failure/no-auth shape.
   setup; there is no separate pairing prompt or `auth_start` confirmation flag.
   Never start BankID or create a new grant because a read failed. Explicit
   revocation retains its confirmation gate.
-- **Small, focused changes.** Keep the existing layering: protocol, persistence,
+- **Small, focused changes.** Keep the layering above: protocol, persistence,
   presentation, and MCP tools separate.
 
 ## Style
