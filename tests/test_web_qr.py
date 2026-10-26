@@ -12,7 +12,7 @@ def test_loopback_view_has_no_external_resources_or_public_frames(capsys):
         view = WebQr(WebQrOptions())
         await view.start()
         try:
-            view.update("synthetic-qr-secret", "waiting")
+            view.show("synthetic-qr-secret", "waiting")
             async with httpx.AsyncClient(trust_env=False) as browser:
                 page = await browser.get(view.url)
                 assert page.status_code == 200

@@ -3,18 +3,17 @@
 from __future__ import annotations
 
 import os
-import tempfile
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from http.cookiejar import Cookie
 from pathlib import Path
 
 import httpx
-import keyring
 from pydantic import BaseModel, Field
 
-from infomentor_mcp.auth.locking import session_lock
+from infomentor_mcp.storage.lock import SessionLock
+from infomentor_mcp.storage.secrets import SecretStore
 
-SERVICE_NAME = "infomentor-mcp"
 ACCOUNT_NAME = "swedish-guardian-session"
 
 
@@ -77,91 +76,62 @@ class AuthSession(BaseModel):
         )
 
 
+class SessionRecord:
+    """Unlocked load/save of the stored web session, for a caller that holds the lock."""
+
+    def __init__(self, secret: SecretStore) -> None:
+        self.secret = secret
+
+    def load(self) -> AuthSession | None:
+        text = self.secret.read()
+        return AuthSession.model_validate_json(text) if text else None
+
+    def save(self, session: AuthSession) -> None:
+        self.secret.write(session.model_dump_json())
+
+    def clear(self) -> None:
+        self.secret.delete()
+
+
 class SessionStore:
-    """Use OS keyrings when possible, with a private XDG-state fallback."""
+    """The guardian web session in the OS keyring, with a private XDG-state fallback.
+
+    Every operation holds the session lock, which also serializes Hub pupil selection and
+    mobile credential changes across threads and processes.
+    """
 
     def __init__(self, fallback_path: Path | None = None) -> None:
         state_home = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
-        self._fallback_path = fallback_path or state_home / "infomentor-mcp" / "session.json"
-        self._lock = session_lock(self._fallback_path.absolute().with_suffix(".lock"))
+        self.fallback_path = fallback_path or state_home / "infomentor-mcp" / "session.json"
+        self.lock = SessionLock.shared(self.fallback_path.absolute().with_suffix(".lock"))
+        self._record = SessionRecord(SecretStore(ACCOUNT_NAME, self.fallback_path))
+
+    @property
+    def state_dir(self) -> Path:
+        """The private directory for other local state next to the session."""
+        return self.fallback_path.parent
 
     def locked(self, timeout: float = 30.0):
         """Serialize a complete operation, including nested load/save calls."""
-        return self._lock.acquire(timeout)
+        return self.lock.acquire(timeout)
 
-    def async_locked(self, timeout: float = 30.0):
-        """Hold across async login; use _load/_save inside to avoid nested flock."""
-        return self._lock.acquire_async(timeout)
+    @asynccontextmanager
+    async def async_locked(self, timeout: float = 30.0):
+        """Hold the lock across an async login and persist through the yielded record.
+
+        The async lock is not reentrant, so nested locked load/save calls would deadlock.
+        """
+        async with self.lock.acquire_async(timeout):
+            yield self._record
 
     def load(self) -> AuthSession | None:
         with self.locked():
-            return self._load()
-
-    def _load(self) -> AuthSession | None:
-        serialized = self._load_keyring()
-        if serialized is None:
-            serialized = self._load_file()
-        return AuthSession.model_validate_json(serialized) if serialized else None
+            return self._record.load()
 
     def save(self, session: AuthSession) -> None:
         with self.locked():
-            self._save(session)
-
-    def _save(self, session: AuthSession) -> None:
-        serialized = session.model_dump_json()
-        if self._save_keyring(serialized):
-            self._remove_file()
-            return
-
-        self._fallback_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        descriptor, name = tempfile.mkstemp(dir=self._fallback_path.parent, prefix=".session-")
-        temporary_path = Path(name)
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-                stream.write(serialized)
-                stream.flush()
-                os.fsync(stream.fileno())
-            temporary_path.replace(self._fallback_path)
-        finally:
-            temporary_path.unlink(missing_ok=True)
+            self._record.save(session)
 
     def clear(self) -> None:
         with self.locked():
-            self._clear()
-
-    def _clear(self) -> None:
-        try:
-            keyring.delete_password(SERVICE_NAME, ACCOUNT_NAME)
-        except keyring.errors.KeyringError:
-            pass
-        self._remove_file()
-
-    def _load_keyring(self) -> str | None:
-        try:
-            return keyring.get_password(SERVICE_NAME, ACCOUNT_NAME)
-        except keyring.errors.KeyringError:
-            return None
-
-    def _save_keyring(self, serialized: str) -> bool:
-        try:
-            keyring.set_password(SERVICE_NAME, ACCOUNT_NAME, serialized)
-        except keyring.errors.KeyringError:
-            return False
-        return True
-
-    def _load_file(self) -> str | None:
-        try:
-            return self._fallback_path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            return None
-
-    def _remove_file(self) -> None:
-        try:
-            self._fallback_path.unlink()
-        except FileNotFoundError:
-            pass
-
-    @property
-    def fallback_path(self) -> Path:
-        """Return the fallback path for status reporting and tests only."""
-        return self._fallback_path
+            self._record.clear()

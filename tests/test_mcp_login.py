@@ -2,14 +2,14 @@ import asyncio
 
 import pytest
 
-from infomentor_mcp.auth.session import AuthSession, SessionStore
-from infomentor_mcp.auth.stockholm_bankid import BankIdOrder, BankIdStatus
-from infomentor_mcp.server import create_server
+from infomentor_mcp.app.mcp import McpApp
+from infomentor_mcp.auth.bankid import BankIdOrder, BankIdStatus, StockholmBankId
+from infomentor_mcp.storage.session import AuthSession, SessionStore
 
 pytestmark = pytest.mark.usefixtures("completed_mobile_login")
 
 
-class PendingProtocol:
+class PendingProtocol(StockholmBankId):
     def __init__(self):
         self.stage = "bankid_wait"
         self.diagnostics = []
@@ -37,7 +37,7 @@ def test_mcp_start_progress_cancel_and_busy_calls_are_responsive(monkeypatch):
     async def scenario():
         protocol = PendingProtocol()
         monkeypatch.setattr("infomentor_mcp.login.attempt.StockholmBankId", lambda: protocol)
-        server = create_server()
+        server = McpApp().build()
         started = (await server.call_tool("auth_start", {})).structured_content
         login_id = started["login_id"]
         assert started["login_url"].startswith("https://app.bankid.com/")
@@ -72,7 +72,7 @@ def test_mcp_start_progress_cancel_and_busy_calls_are_responsive(monkeypatch):
 
 @pytest.mark.parametrize("tool", ["auth_progress", "auth_wait"])
 def test_unknown_login_ids_do_not_expose_another_login(tool):
-    server = create_server()
+    server = McpApp().build()
     result = asyncio.run(server.call_tool(tool, {"login_id": "unknown-secret"}))
     assert result.structured_content["error"]["code"] == "unknown_login"
     assert "unknown-secret" not in str(result)
@@ -82,7 +82,7 @@ def test_wait_returns_verified_completion_without_secrets(monkeypatch):
     async def scenario():
         protocol = PendingProtocol()
         monkeypatch.setattr("infomentor_mcp.login.attempt.StockholmBankId", lambda: protocol)
-        server = create_server()
+        server = McpApp().build()
         started = (await server.call_tool("auth_start", {})).structured_content
         args = {"login_id": started["login_id"]}
         waiter = asyncio.create_task(server.call_tool("auth_wait", args))
@@ -100,7 +100,7 @@ def test_wait_returns_verified_completion_without_secrets(monkeypatch):
 
 
 def test_mcp_mobile_authorization_changes_require_explicit_confirmation(httpx_mock):
-    server = create_server()
+    server = McpApp().build()
     result = asyncio.run(server.call_tool("auth_revoke", {"confirm": False}))
     assert result.structured_content["error"]["code"] == "confirmation_required"
     assert not httpx_mock.get_requests()

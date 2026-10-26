@@ -1,14 +1,14 @@
 import asyncio
 
-from infomentor_mcp.auth.session import AuthSession
-from infomentor_mcp.auth.stockholm_bankid import BankIdOrder, BankIdStatus
-from infomentor_mcp.login import terminal_qr
+from infomentor_mcp.auth.bankid import BankIdOrder, BankIdStatus, StockholmBankId
+from infomentor_mcp.login.terminal import TerminalQr
+from infomentor_mcp.storage.session import AuthSession
 
 
-class ReadyProtocol:
+class ReadyProtocol(StockholmBankId):
     def __init__(self):
         self.statuses = iter([
-            BankIdStatus("USER_SIGN", "updated-qr"), BankIdStatus("OK")
+            BankIdStatus("USER_SIGN", "updated-qr"), BankIdStatus("USER_SIGN"), BankIdStatus("OK")
         ])
 
     async def poll(self, order):
@@ -18,17 +18,17 @@ class ReadyProtocol:
         return AuthSession()
 
 
-def test_terminal_flow_owns_its_qr_updates(monkeypatch):
+def test_terminal_view_redraws_only_changed_qr_codes(monkeypatch):
     frames = []
 
     async def no_delay(_):
         pass
 
     monkeypatch.setattr(asyncio, "sleep", no_delay)
-    monkeypatch.setattr(terminal_qr.TerminalQr, "draw", lambda self, data: frames.append(data))
-    result = asyncio.run(terminal_qr.wait_for_approval(
-        ReadyProtocol(),
+    monkeypatch.setattr(TerminalQr, "draw", lambda self, data: frames.append(data))
+    result = asyncio.run(ReadyProtocol().wait(
         BankIdOrder("https://login003.stockholm.se/", "order", qr_data="initial-qr"),
+        TerminalQr(),
     ))
     assert isinstance(result, AuthSession)
     assert frames == ["initial-qr", "updated-qr"]

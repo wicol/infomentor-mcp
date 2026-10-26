@@ -4,18 +4,18 @@ import threading
 import httpx
 import pytest
 
-from infomentor_mcp.auth.locking import SessionLockTimeout
-from infomentor_mcp.auth.mobile_pairing import MobileFlowError
-from infomentor_mcp.auth.session import AuthSession, SessionStore
-from infomentor_mcp.auth.stockholm_bankid import BankIdOrder, BankIdStatus
+from infomentor_mcp.auth.bankid import BankIdOrder, BankIdStatus, StockholmBankId
+from infomentor_mcp.errors import MobileFlowError
 from infomentor_mcp.login.attempt import LoginAttempt
 from infomentor_mcp.login.complete import complete_mobile_login
 from infomentor_mcp.login.web_qr import WebQrOptions
+from infomentor_mcp.storage.lock import SessionLockTimeout
+from infomentor_mcp.storage.session import AuthSession, SessionStore
 
 pytestmark = pytest.mark.usefixtures("completed_mobile_login")
 
 
-class FakeProtocol:
+class FakeProtocol(StockholmBankId):
     def __init__(self):
         self.stage = "bankid_wait"
         self.diagnostics = []
@@ -168,7 +168,7 @@ def test_mobile_setup_failure_returns_partial_without_exposing_secrets(monkeypat
     def failed(_):
         raise ValueError("secret-token")
 
-    monkeypatch.setattr("infomentor_mcp.auth.mobile_pairing.MobilePairing.complete_login", failed)
+    monkeypatch.setattr("infomentor_mcp.auth.mobile.MobileAuthorization.complete_login", failed)
 
     async def scenario():
         store = SessionStore()
@@ -190,14 +190,14 @@ def test_mobile_setup_failure_returns_partial_without_exposing_secrets(monkeypat
 def test_wait_and_cancel_do_not_abandon_mobile_persistence(monkeypatch):
     started, release = threading.Event(), threading.Event()
 
-    def finish(flow):
+    def finish(authorization):
         started.set()
         assert release.wait(3)
-        session = flow.store.load()
+        session = authorization.store.load()
         session.mobile_binding = "completed-binding"
-        flow.store.save(session)
+        authorization.store.save(session)
 
-    monkeypatch.setattr("infomentor_mcp.auth.mobile_pairing.MobilePairing.complete_login", finish)
+    monkeypatch.setattr("infomentor_mcp.auth.mobile.MobileAuthorization.complete_login", finish)
 
     async def scenario():
         store = SessionStore()

@@ -1,20 +1,15 @@
 import pytest
 
-from infomentor_mcp.client.http import (
-    AuthenticationExpiredError,
-    InfoMentorError,
-    InfoMentorHttpClient,
-    UnsafeRedirectError,
-    validate_auth_url,
-)
+from infomentor_mcp.errors import AuthenticationExpiredError, InfoMentorError, UnsafeRedirectError
+from infomentor_mcp.hub.transport import HubTransport, validate_auth_url
 
 
 def test_access_denial_does_not_count_as_expiry(httpx_mock):
     httpx_mock.add_response(status_code=403)
-    client = InfoMentorHttpClient()
+    client = HubTransport()
     try:
         with pytest.raises(InfoMentorError) as error:
-            client.hub_post("/timetable/timetable/appData", {})
+            client.post("/timetable/timetable/appData", {})
         assert not isinstance(error.value, AuthenticationExpiredError)
     finally:
         client.close()
@@ -23,7 +18,7 @@ def test_access_denial_does_not_count_as_expiry(httpx_mock):
 @pytest.mark.parametrize("payload", [True, {}, {"items": "unexpected"}])
 def test_probe_requires_actual_timetable_structure(httpx_mock, payload):
     httpx_mock.add_response(json=payload)
-    client = InfoMentorHttpClient()
+    client = HubTransport()
     try:
         with pytest.raises(InfoMentorError, match="inconclusive"):
             client.verify_authenticated_read()
@@ -47,9 +42,9 @@ def test_empty_hub_response_is_expired_session(httpx_mock) -> None:
         status_code=200,
         content=b"",
     )
-    client = InfoMentorHttpClient()
+    client = HubTransport()
     with pytest.raises(AuthenticationExpiredError):
-        client.hub_post("/Communication/News/GetNewsList", {})
+        client.post("/Communication/News/GetNewsList", {})
     client.close()
 
 
@@ -60,9 +55,9 @@ def test_hub_login_redirect_is_expired_session(httpx_mock) -> None:
         status_code=302,
         headers={"location": "https://sso.infomentor.se/login.ashx"},
     )
-    client = InfoMentorHttpClient()
+    client = HubTransport()
     with pytest.raises(
         AuthenticationExpiredError, match="host: sso.infomentor.se, path: /login.ashx"
     ):
-        client.hub_post("/Communication/News/GetNewsList", {})
+        client.post("/Communication/News/GetNewsList", {})
     client.close()

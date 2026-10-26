@@ -101,6 +101,7 @@ link is sensitive; treat it like the QR. Approve the login yourself in BankID.
 
 | Tool | Purpose |
 | --- | --- |
+| `ack_changes(consumer, cursor)` | Acknowledge successful processing through a delivered change cursor. |
 | `auth_cancel(login_id)` | Stop local polling and close the QR viewer. |
 | `auth_progress(login_id)` | Sanitized progress and HTTP stage diagnostics. |
 | `auth_revoke(confirm)` | Revoke the refresh credential, then remove it locally. |
@@ -109,6 +110,7 @@ link is sensitive; treat it like the QR. Approve the login yourself in BankID.
 | `auth_wait(login_id)` | Wait until the attempt ends; returns immediately if already finished. |
 | `get_attachments(child_id, news_id, attachment_id, attachment_mode)` | Read one discovered attachment as inline text. Separate calls may run in parallel. |
 | `get_calendar(start_date, end_date, child_ids?, offset, limit)` | Calendar events overlapping an inclusive Stockholm date range; earliest first. |
+| `get_changes(consumer, limit)` | Read pending local changes without contacting InfoMentor or acknowledging them. |
 | `get_childcare_schedule(start_date, end_date, child_ids?, offset, limit, include_comments)` | Fritidsschema with comments by default; fetching comments marks them read. |
 | `get_news(child_ids?, offset, limit, include_attachments, attachment_mode)` | Unique news for selected children, or all when omitted; attachment text included by default. |
 | `get_notifications(child_ids?, offset, limit)` | Pupil-linked notifications, newest first, with independent state per child. |
@@ -116,6 +118,7 @@ link is sensitive; treat it like the QR. Approve the login yourself in BankID.
 | `list_children()` | List linked children with stable IDs. |
 | `set_childcare_comment(child_id, dates, comment, confirm)` | Preview or replace guardian comments on explicit dates; marks comments read. |
 | `set_childcare_schedule(child_id, dates, start_time?, end_time?, on_leave, confirm)` | Preview or set childcare times/leave on explicit dates. |
+| `sync_changes(sources?, child_ids?, start_date?, end_date?, include_attachments, request_delay_seconds, consumer, limit)` | Fetch news/calendar changes and return pending work; first fetch establishes a baseline. |
 
 Authentication tools never return cookies or tokens. An agent starts login only
 at the user's request; `auth_start` has no `confirm` parameter or separate
@@ -127,6 +130,17 @@ for every requested child who received the post. Pagination applies after
 deduplication and sorting, so `limit=10` means ten unique news items. Pass a
 one-element `child_ids` list for a single child; an empty list selects none.
 This replaces the earlier singular `child_id` argument and response field.
+
+### Change tracking
+
+`infomentor-mcp sync` checks news and calendar without an LLM, with attachments
+included and a one-second delay between requests by default. First fetch creates
+a baseline; later runs return pending changes for a named consumer. CLI and MCP
+support explicit acknowledgement, so failed processing can be retried.
+
+See [change tracking](docs/change-tracking.md) for parameters, scheduling,
+delivery semantics, private local storage and reset. Scheduling and agent wakeup
+belong to the caller, not the MCP server.
 
 ### Calendar
 

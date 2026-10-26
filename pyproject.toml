@@ -39,7 +39,7 @@ dev = [
 ]
 
 [project.scripts]
-infomentor-mcp = "infomentor_mcp.cli:main"
+infomentor-mcp = "infomentor_mcp.app.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/wicol/infomentor-mcp"

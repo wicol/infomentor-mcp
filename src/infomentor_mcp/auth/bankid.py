@@ -2,59 +2,25 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from html.parser import HTMLParser
+from typing import Protocol
 from urllib.parse import urlencode, urlparse
-from zoneinfo import ZoneInfo
 
 import httpx
 
-from infomentor_mcp.auth.session import AuthSession
-from infomentor_mcp.client.http import HUB_ORIGIN, InfoMentorError, validate_auth_url
+from infomentor_mcp.auth.saml import MAX_HOPS, SSO_LOGIN_URL, LoginPage, SamlFlow
+from infomentor_mcp.errors import InfoMentorError
+from infomentor_mcp.hub.transport import (
+    HUB_ORIGIN,
+    USER_AGENT_HEADERS,
+    HubTransport,
+    validate_auth_url,
+)
+from infomentor_mcp.storage.session import AuthSession
 
-SSO_LOGIN_URL = "https://sso.infomentor.se/login.ashx?idp=stockholm_par"
-MAX_HOPS = 12
-
-
-@dataclass(frozen=True)
-class HtmlForm:
-    action: str = field(repr=False)
-    fields: dict[str, str] = field(repr=False)
-
-
-class LoginPage(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__()
-        self.forms: list[HtmlForm] = []
-        self.mbid_href: str | None = None
-        self._action: str | None = None
-        self._fields: dict[str, str] = {}
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        attributes = dict(attrs)
-        if tag == "form":
-            self._action = attributes.get("action") or ""
-            self._fields = {}
-        elif tag == "input" and self._action is not None and attributes.get("name"):
-            self._fields[attributes["name"]] = attributes.get("value") or ""
-        elif tag == "a" and self.mbid_href is None:
-            href = attributes.get("href") or ""
-            if "NECSadc/mbid" in href:
-                self.mbid_href = href
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag == "form" and self._action is not None:
-            self.forms.append(HtmlForm(self._action, self._fields))
-            self._action = None
-            self._fields = {}
-
-
-def parse_login_page(html: str) -> LoginPage:
-    page = LoginPage()
-    page.feed(html)
-    return page
+APPROVAL_TIMEOUT_SECONDS = 240
 
 
 @dataclass(frozen=True)
@@ -71,13 +37,18 @@ class BankIdStatus:
     qr_data: str | None = field(default=None, repr=False)
 
 
+class ApprovalView(Protocol):
+    """Shows the animated QR code and login status while waiting for approval."""
+
+    def show(self, qr_data: str | None, status: str) -> None: ...
+
+
 class StockholmBankId:
     """Concrete protocol steps: start, poll, SAML completion and verified session."""
 
     def __init__(self) -> None:
         self.client = httpx.AsyncClient(
-            follow_redirects=False, timeout=20,
-            headers={"User-Agent": "infomentor-mcp/0.0.1", "Accept": "*/*"},
+            follow_redirects=False, timeout=20, headers=USER_AGENT_HEADERS,
         )
         self.stage = "sso"
         self.diagnostics: list[dict] = []
@@ -111,9 +82,8 @@ class StockholmBankId:
                 url = validate_auth_url(location, str(response.url))
                 verb, data = "GET", None
                 continue
-            page = parse_login_page(response.text)
-            form = next((item for item in page.forms if "SAMLRequest" in item.fields), None)
-            if form:
+            page = LoginPage(response.text)
+            if form := page.form_with("SAMLRequest"):
                 url = validate_auth_url(form.action, str(response.url))
                 verb, data = "POST", form.fields
                 continue
@@ -165,38 +135,38 @@ class StockholmBankId:
             raise InfoMentorError("BankID order was rejected or cancelled.")
         return BankIdStatus(state, qr_data)
 
+    async def wait(self, order: BankIdOrder, view: ApprovalView | None = None) -> AuthSession:
+        """Poll until approved, keeping an optional view's QR code and status current."""
+        qr_data = order.qr_data
+        if view:
+            view.show(qr_data, "waiting")
+        async with asyncio.timeout(APPROVAL_TIMEOUT_SECONDS):
+            while True:
+                await asyncio.sleep(1)
+                status = await self.poll(order)
+                if status.state == "OK":
+                    if view:
+                        view.show(None, "verifying")
+                    return await self.finish(order)
+                qr_data = status.qr_data or qr_data
+                if view:
+                    view.show(qr_data, "user_sign" if status.state == "USER_SIGN" else "waiting")
+
     async def finish(self, order: BankIdOrder) -> AuthSession:
         self.stage = "saml"
         response = await self.request("GET", order.page_url)
         for _ in range(MAX_HOPS):
-            if response.is_redirect:
-                location = response.headers.get("location")
-                if not location:
-                    raise InfoMentorError("SAML redirect had no destination.")
-                response = await self.request(
-                    "GET", validate_auth_url(location, str(response.url))
-                )
-                continue
-            page = parse_login_page(response.text)
-            form = next((item for item in page.forms if any(
-                key in item.fields for key in ("SAMLResponse", "SAMLRequest")
-            )), None)
-            if form is None and "login in progress" in response.text.lower() and page.forms:
-                form = page.forms[0]
-            if form is None:
+            hop = SamlFlow.next_request(response)
+            if hop is None:
                 break
-            response = await self.request(
-                "POST", validate_auth_url(form.action, str(response.url)), data=form.fields
-            )
+            method, url, data = hop
+            response = await self.request(method, url, data=data)
         else:
-            raise InfoMentorError("SAML form/redirect limit reached.")
+            raise InfoMentorError("SAML redirect/form limit reached.")
         self.stage = "verify"
-        start = datetime.now(ZoneInfo("Europe/Stockholm")).date()
         response = await self.request(
-            "POST", HUB_ORIGIN + "/timetable/timetable/appData",
-            json={
-                "startDate": start.isoformat(), "endDate": (start + timedelta(days=1)).isoformat(),
-            },
+            "POST", HUB_ORIGIN + HubTransport.VERIFY_PATH,
+            json=HubTransport.verification_payload(),
             headers={"Accept": "application/json", "X-Requested-With": "XMLHttpRequest"},
         )
         try:

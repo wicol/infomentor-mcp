@@ -5,15 +5,19 @@ from __future__ import annotations
 import asyncio
 import secrets
 
-from infomentor_mcp.auth.locking import SessionLockTimeout
-from infomentor_mcp.auth.session import SessionStore
-from infomentor_mcp.auth.stockholm_bankid import StockholmBankId
-from infomentor_mcp.login import url, web_qr
+from infomentor_mcp.auth.bankid import StockholmBankId
 from infomentor_mcp.login.complete import complete_mobile_login
 from infomentor_mcp.login.web_qr import WebQr, WebQrOptions
+from infomentor_mcp.storage.lock import SessionLockTimeout
+from infomentor_mcp.storage.session import SessionStore
 
 
 class LoginAttempt:
+    """One background MCP login: BankID, then automatic mobile authorization setup.
+
+    Tools observe it through sanitized snapshots; the login link is only returned once.
+    """
+
     def __init__(
         self, store: SessionStore, method: str, options: WebQrOptions,
         *, protocol_factory=None,
@@ -68,7 +72,7 @@ class LoginAttempt:
 
     async def _run(self) -> None:
         try:
-            async with asyncio.timeout(300), self.store.async_locked(timeout=0):
+            async with asyncio.timeout(300), self.store.async_locked(timeout=0) as record:
                 self.protocol = self.protocol_factory()
                 if self.method == "web-qr":
                     self.protocol.stage = "web_setup"
@@ -84,26 +88,20 @@ class LoginAttempt:
                         await self.view.opened.wait()
                 order = await self.protocol.begin("url" if self.method == "url" else "qr")
                 self.link = order.launch_url if self.method == "url" else self.view.url
-                if self.view:
-                    self.view.update(order.qr_data, "waiting")
                 self.state = "waiting"
                 self.ready.set()
-                if self.method == "url":
-                    session = await url.wait_for_approval(self.protocol, order)
-                else:
-                    session = await web_qr.wait_for_approval(self.protocol, order, self.view)
+                session = await self.protocol.wait(order, self.view)
                 self.state = "saving"
-                # The async flock is held: a nested sync store.save would deadlock.
-                self.store._save(session)
+                record.save(session)
                 self.web_session_stored = True
             self.state = "pairing"
             self.protocol.stage = "mobile_setup"
             if self.view:
-                self.view.update(None, "pairing")
+                self.view.show(None, "pairing")
             await complete_mobile_login(self.store, session)
             if self.view:
                 self.state = "finishing"
-                self.view.update(None, "complete")
+                self.view.show(None, "complete")
                 await asyncio.sleep(1)
             self.state = "complete"
         except asyncio.CancelledError:

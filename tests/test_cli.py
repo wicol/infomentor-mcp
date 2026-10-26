@@ -1,12 +1,18 @@
+import json
 from contextlib import nullcontext
 
 import pytest
 
-import infomentor_mcp.cli as cli
+from infomentor_mcp.app.cli import Cli
+from infomentor_mcp.login.terminal import TerminalLogin
+from infomentor_mcp.storage.session import AuthSession, SessionStore
 
 
 class EmptySessionStore:
-    def locked(self):
+    def __init__(self, state_dir):
+        self.state_dir = state_dir
+
+    def locked(self, timeout=30):
         return nullcontext()
 
     def load(self):
@@ -16,44 +22,36 @@ class EmptySessionStore:
         pass
 
 
-def test_auth_status_is_available_before_login(capsys, monkeypatch) -> None:
-    monkeypatch.setattr(cli, "SessionStore", EmptySessionStore)
-    assert cli.main(["auth", "status"]) == 0
+@pytest.mark.parametrize("args", [["auth", "status"], ["auth", "status", "--verify"]])
+def test_auth_status_is_available_before_login(capsys, tmp_path, args) -> None:
+    assert Cli(EmptySessionStore(tmp_path)).run(args) == 0
     assert "No authenticated session" in capsys.readouterr().out
 
 
-def test_auth_status_accepts_verify_flag(capsys, monkeypatch) -> None:
-    monkeypatch.setattr(cli, "SessionStore", EmptySessionStore)
-    assert cli.main(["auth", "status", "--verify"]) == 0
-    assert "No authenticated session" in capsys.readouterr().out
+def test_sync_without_login_returns_json(capsys, tmp_path, httpx_mock) -> None:
+    assert Cli(EmptySessionStore(tmp_path)).run(["sync"]) == 1
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "authentication_required"
+    assert not httpx_mock.get_requests()
 
 
-def test_pending_command_returns_nonzero(capsys) -> None:
-    assert cli.main(["sync"]) == 2
-    assert "sync command" in capsys.readouterr().out
+def test_measurement_cli_accepts_idle_mode():
+    args = Cli().parser.parse_args(["auth", "measure", "--idle-minutes", "60", "--method", "url"])
+    assert args.idle_minutes == 60
+    assert args.method == "url"
 
 
-def test_measurement_cli_accepts_idle_mode_without_starting_login(monkeypatch):
-    received = []
-    monkeypatch.setattr(cli, "_run_measurement", lambda args: received.append(args) or 0)
-    assert cli.main(["auth", "measure", "--idle-minutes", "60", "--method", "url"]) == 0
-    assert received[0].idle_minutes == 60
-    assert received[0].method == "url"
-
-
-def test_invalid_measurement_options_fail_before_login():
+def test_invalid_measurement_options_fail_before_login(monkeypatch):
+    monkeypatch.setattr(TerminalLogin, "run", lambda self: pytest.fail("Login started"))
     with pytest.raises(SystemExit) as error:
-        cli.main(["auth", "measure", "--duration-minutes", "10", "--idle-minutes", "20"])
+        Cli().run(["auth", "measure", "--duration-minutes", "10", "--idle-minutes", "20"])
     assert error.value.code == 2
 
 
 def test_cli_async_login_saves_verified_session(monkeypatch, capsys, completed_mobile_login):
-    from infomentor_mcp.auth.session import AuthSession, SessionStore
-
-    async def fake_login():
+    async def fake_login(self):
         return AuthSession()
 
-    monkeypatch.setattr(cli.url, "login", fake_login)
-    assert cli.main(["auth", "login", "--method", "url"]) == 0
-    assert SessionStore().load() is not None
+    monkeypatch.setattr(TerminalLogin, "run", fake_login)
+    assert Cli().run(["auth", "login", "--method", "url"]) == 0
+    assert SessionStore().load().mobile_binding == "synthetic-bound-login"
     assert "bound for mobile renewal" in capsys.readouterr().out
