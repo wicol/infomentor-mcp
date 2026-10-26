@@ -46,7 +46,8 @@ coordination; there are no worker leases or exactly-once guarantees.
   0–60, and spaces data, page, attachment and pupil-switch requests. Authentication
   renewal itself uses the existing authentication flow, not this pacing hook.
 - Children are discovered/verified once, then all selected sources are fetched
-  per child. Original selection is restored, including on failure. The existing
+  per child, starting with the child left selected by verification so no switch
+  is repeated. Original selection is restored, including on failure. The existing
   shared session lock protects the operation. An expired session may renew and
   replay the collection once; no changes are committed from an abandoned attempt.
 
@@ -66,12 +67,15 @@ across source types.
 
 ## Attachments
 
-Successfully downloaded supported files receive a SHA-256 of the original bytes,
-so replacing a file with identical extracted text can still produce a change.
-The existing size, count, text and format limits apply **per child** during sync.
-Files are rechecked on each attachment-enabled sync, subject to those limits.
-`attachment_checks` reports each file's status and whether its bytes were checked.
-Calendar attachment content is not fetched by the existing calendar reader.
+Hub never replaces the file behind an attachment ID, so each file is read once:
+a file shared by several children is downloaded once per sync, and a file with a
+definitive outcome (extracted, no text, OCR required, encrypted, invalid, too large
+or unsupported) is reused from the snapshots of later syncs. Failed and limited
+reads are retried on the next sync. Successfully downloaded supported files keep a
+SHA-256 of the original bytes. The existing size, count, text and format limits
+apply **per child** during sync. `attachment_checks` reports each file's status and
+whether a hash of its bytes is known. Calendar attachment content is not fetched
+by the existing calendar reader.
 
 A failed/limited read preserves previously known file content in the snapshot;
 it is not evidence that the file became empty or remained unchanged. Inspect

@@ -55,6 +55,11 @@ class FakeHub:
             is_optional=True, is_reusable=True,
         )
 
+    def visiting_order(self, targets) -> list[str]:
+        """Discovery ends on the last linked pupil, so it is read first, without a switch."""
+        last = list(self.children)[-1]
+        return sorted(targets, key=lambda child: child != last)
+
     def read_by(self, path) -> list[str]:
         """The pupil selected at each read of `path`."""
         return [pupil for read_path, pupil in self.reads if read_path == path]

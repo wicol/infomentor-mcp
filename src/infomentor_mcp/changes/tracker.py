@@ -13,7 +13,7 @@ from infomentor_mcp.features.attachments import AttachmentReader
 from infomentor_mcp.features.calendar import Calendar
 from infomentor_mcp.features.news import News
 from infomentor_mcp.hub.hub import Hub
-from infomentor_mcp.models import STOCKHOLM, DateRange
+from infomentor_mcp.models import STOCKHOLM, Attachment, DateRange
 
 
 class RequestPacer:
@@ -72,11 +72,17 @@ class ChangeTracker:
         if not 0 <= request_delay_seconds <= 60:
             raise InvalidInput("Request delay must be between 0 and 60 seconds.")
         pacer = RequestPacer(request_delay_seconds)
-        return self.hub.run(
-            lambda: self._snapshots(sources, child_ids, period, include_attachments, pacer)
-        )
+        # Files never change behind an attachment ID: reuse settled reads from earlier syncs,
+        # and download files shared between children once.
+        files = {
+            attachment.id: attachment
+            for attachment in map(Attachment.model_validate, self.changes.known_attachments())
+            if attachment.is_settled
+        } if include_attachments else None
+        return self.hub.run(lambda: self._snapshots(sources, child_ids, period, files, pacer))
 
-    def _snapshots(self, sources, child_ids, period, include_attachments, pacer) -> dict:
+    def _snapshots(self, sources, child_ids, period, files, pacer) -> dict:
+        """`files` caches attachment reads by ID; None excludes attachments."""
         snapshots, errors, attachment_checks = [], [], []
         # Attach to the current connection pool on every replay after renewal.
         pupils = self.hub.pupils
@@ -85,7 +91,7 @@ class ChangeTracker:
                 pupils.select(child.id)
                 for source in dict.fromkeys(sources):
                     try:
-                        items = self._read(child.id, source, period, include_attachments)
+                        items = self._read(child.id, source, period, files)
                     except AuthenticationExpiredError:
                         raise
                     except (InfoMentorError, httpx.HTTPError):
@@ -96,7 +102,7 @@ class ChangeTracker:
                         "child_id": child.id, "source": source,
                         "items": [item.model_dump(mode="json") for item in items],
                     })
-                    if source == "news" and include_attachments:
+                    if source == "news" and files is not None:
                         attachment_checks += [{
                             "child_id": child.id, "news_id": item.id,
                             "attachment_id": attachment.id, "status": attachment.status,
@@ -106,10 +112,10 @@ class ChangeTracker:
                 "binding": self.hub.transport.mobile_binding,
                 "attachment_checks": attachment_checks}
 
-    def _read(self, child_id, source, period, include_attachments) -> list:
+    def _read(self, child_id, source, period, files) -> list:
         if source == "calendar":
             return self.calendar.read_selected(child_id, period)
         items = self.news.read_selected(child_id)
-        if include_attachments:
-            AttachmentReader(self.hub.transport).enrich(items)
+        if files is not None:
+            AttachmentReader(self.hub.transport, files).enrich(items)
         return items

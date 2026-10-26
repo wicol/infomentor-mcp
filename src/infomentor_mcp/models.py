@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from datetime import date as Date
-from typing import Any
+from typing import Any, ClassVar
 from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
 
@@ -66,12 +66,22 @@ class Child(BaseModel):
 class Attachment(BaseModel):
     """A discovered news attachment and, when requested, its inline text."""
 
+    SETTLED_STATUSES: ClassVar[frozenset[str]] = frozenset({
+        "extracted", "ocr_required", "no_text", "encrypted", "invalid_format",
+        "extraction_failed", "too_large", "unsupported_type",
+    })
+
     id: str | None
     name: str | None = None
     status: str = "available"
     text: str | None = None
     truncated: bool = False
     content_sha256: str | None = None
+
+    @property
+    def is_settled(self) -> bool:
+        """A read had a definitive outcome; Hub never replaces the file behind an ID."""
+        return self.id is not None and self.status in self.SETTLED_STATUSES
 
     @classmethod
     def list_from_hub(cls, news_id: str, raw: object) -> list[Attachment]:

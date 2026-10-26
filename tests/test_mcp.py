@@ -52,7 +52,7 @@ def test_list_children_and_news_return_structured_data(fake_hub, server):
     assert result["items"][0]["child_ids"] == ["first"]
     page = call(server, "get_news", {"offset": 1, "limit": 1})
     assert [item["id"] for item in page["items"]] == ["news-2"]
-    assert page["items"][0]["child_ids"] == ["first", "second"]
+    assert page["items"][0]["child_ids"] == ["second", "first"]
 
 
 def test_data_tools_explain_missing_authentication(fake_hub):

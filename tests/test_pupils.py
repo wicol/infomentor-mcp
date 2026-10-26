@@ -36,13 +36,13 @@ def test_rejects_unknown_child_before_switching(fake_hub, hub):
 
 def test_ignored_child_switch_rejected_before_read(fake_hub, hub):
     def news(request, child):
-        fake_hub.ignored_switches.add("second")
+        fake_hub.ignored_switches.add("first")
         return {"items": [{"id": child}]}
 
     fake_hub.route(NEWS, news)
     with pytest.raises(UnexpectedInfoMentorResponse, match="did not confirm"):
         News(hub).items()
-    assert fake_hub.read_by(NEWS) == ["first"]
+    assert fake_hub.read_by(NEWS) == ["second"]
 
 
 @pytest.mark.parametrize("names, ignored", [
@@ -58,8 +58,23 @@ def test_duplicate_names_or_ignored_discovery_rejected(fake_hub, hub, names, ign
 
 
 def test_failed_first_read_restores_original_selection(fake_hub, hub):
+    fake_hub.selected = "first"
     fake_hub.route(NEWS, lambda request, child: httpx.Response(200, json={}))
     with pytest.raises(UnexpectedInfoMentorResponse):
         News(hub).items()
-    assert fake_hub.read_by(NEWS) == ["first"]
-    assert fake_hub.selected == "second"
+    assert fake_hub.read_by(NEWS) == ["second"]
+    assert fake_hub.selected == "first"
+
+
+@pytest.mark.parametrize("original, switches", [
+    # Discovery ends on the last child; it is read first and the original restored once.
+    ("first", ["first", "second", "first"]),
+    ("second", ["first", "second", "first", "second"]),
+])
+def test_already_selected_children_are_not_switched_to_again(fake_hub, hub, original, switches):
+    fake_hub.selected = original
+    fake_hub.route(NEWS, lambda request, child: {"items": []})
+    News(hub).items()
+    assert fake_hub.read_by(NEWS) == ["second", "first"]
+    assert fake_hub.switches == switches
+    assert fake_hub.selected == original

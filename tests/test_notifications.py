@@ -29,14 +29,15 @@ def test_notifications_merge_states_filter_selected_records_and_restore(
 ):
     fake_hub.route(PATH, notifications)
     targets = ["first", "second"] if child_ids is None else list(dict.fromkeys(child_ids))
+    visited = fake_hub.visiting_order(targets)
     items = Notifications(hub).items(child_ids)
     assert [item.id for item in items] == (
-        ["101", "102", "7"] if child_ids is None else ["101", "7"] if targets else []
+        ["102", "101", "7"] if child_ids is None else ["101", "7"] if targets else []
     )
     if targets:
-        assert items[-1].child_ids == targets
+        assert items[-1].child_ids == visited
         assert items[-1].states == {id_: "New" if id_ == "first" else "Read" for id_ in targets}
-    assert fake_hub.read_by(PATH) == targets
+    assert fake_hub.read_by(PATH) == visited
     assert fake_hub.selected == "second"
     for request in fake_hub.requests(PATH):
         assert json.loads(request.content) == {}  # No IDs/state updates or followed destinations.

@@ -55,11 +55,12 @@ def test_childcare_reads_requested_weeks_and_keeps_children_separate(fake_hub, h
         assert items[-1].on_leave and items[-1].starts_at is None
         assert items[-1].opens_at.isoformat().endswith("+01:00")
         assert items[-1].has_unread_comments
-    assert fake_hub.read_by(WEEKS) == [child for child in targets for _ in range(2)]
+    visited = fake_hub.visiting_order(targets)
+    assert fake_hub.read_by(WEEKS) == [child for child in visited for _ in range(2)]
     assert fake_hub.selected == "second"
     assert [json.loads(r.content) for r in fake_hub.requests(WEEKS)] == [{
         "date": f"2026-10-{week}T00:00:00.000Z", "showNextWeekIfNoMoreSchoolDays": False,
-    } for _ in targets for week in (19, 26)]
+    } for _ in visited for week in (19, 26)]
 
 
 @pytest.mark.parametrize("mode", ["default", "skip", "invalid", "http_failure"])
@@ -116,5 +117,5 @@ def test_childcare_refuses_wrong_week_or_invalid_day_and_restores(fake_hub, hub,
     with pytest.raises(UnexpectedInfoMentorResponse) as error:
         Childcare(hub).schedule(date(2026, 10, 22), date(2026, 10, 23))
     assert "secret" not in str(error.value)
-    assert fake_hub.read_by(WEEKS) == ["first"]
+    assert fake_hub.read_by(WEEKS) == ["second"]
     assert fake_hub.selected == "second"

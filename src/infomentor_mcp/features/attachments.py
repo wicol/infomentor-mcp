@@ -23,8 +23,8 @@ logging.getLogger("pypdf").setLevel(logging.CRITICAL)
 class AttachmentReader:
     """Download and extract news attachments within per-file and per-batch limits.
 
-    One reader is one batch: identical files are downloaded once and the total amount of
-    returned text is bounded.
+    One reader is one batch with bounded file count and total text. Readers may share a
+    cache of read files, keyed by attachment ID, so each file is downloaded at most once.
     """
 
     MAX_FILE_BYTES = 10 * 1024 * 1024
@@ -32,9 +32,12 @@ class AttachmentReader:
     MAX_TEXT_CHARS = 20_000
     MAX_TOTAL_TEXT_CHARS = 60_000
 
-    def __init__(self, transport: HubTransport) -> None:
+    def __init__(
+        self, transport: HubTransport, cache: dict[str, Attachment] | None = None,
+    ) -> None:
         self.transport = transport
-        self.cache: dict[str, Attachment] = {}
+        self.cache = {} if cache is None else cache
+        self.included: set[str] = set()
         self.remaining = self.MAX_TOTAL_TEXT_CHARS
 
     def enrich(self, items: list[NewsItem]) -> None:
@@ -44,14 +47,17 @@ class AttachmentReader:
                 if attachment.status != "available":
                     continue
                 if self.remaining <= 0 or (
-                    attachment.id not in self.cache and len(self.cache) >= self.MAX_ATTACHMENTS
+                    attachment.id not in self.included
+                    and len(self.included) >= self.MAX_ATTACHMENTS
                 ):
                     result = attachment.model_copy(update={"status": "limit_reached"})
                 elif attachment.id in self.cache:
+                    self.included.add(attachment.id)
                     result = self.cache[attachment.id].model_copy(
                         deep=True, update={"name": attachment.name},
                     )
                 else:
+                    self.included.add(attachment.id)
                     result = self.read(item.id, attachment)
                     self.cache[attachment.id] = result.model_copy(deep=True)
                 if result.text:

@@ -2,6 +2,8 @@ import asyncio
 import json
 from copy import deepcopy
 from datetime import date
+from io import BytesIO
+from zipfile import ZipFile
 
 import httpx
 import pytest
@@ -194,9 +196,10 @@ def test_collection_is_child_first_with_single_discovery(tracking_hub, tracker):
     tracking_hub.route(CALENDAR, lambda request, child: [])
     result = tracker.collect(["news", "calendar"], None, *DAYS, request_delay_seconds=0)
     assert tracking_hub.reads == [
-        (NEWS, "one"), (CALENDAR, "one"), (NEWS, "two"), (CALENDAR, "two"),
+        (NEWS, "two"), (CALENDAR, "two"), (NEWS, "one"), (CALENDAR, "one"),
     ]
     assert len(tracking_hub.requests("/")) == 1
+    assert tracking_hub.switches == ["one", "two", "one"]
     assert tracking_hub.selected == "one"
     assert len(result["snapshots"]) == 4
 
@@ -206,7 +209,7 @@ def test_partial_errors_restore_child_and_preserve_other_sources(tracking_hub, t
     tracking_hub.route(CALENDAR, lambda request, child: [])
     result = tracker.collect(["news", "calendar"], None, *DAYS, request_delay_seconds=0)
     assert [(e["child_id"], e["source"]) for e in result["errors"]] == [
-        ("one", "news"), ("two", "news"),
+        ("two", "news"), ("one", "news"),
     ]
     assert [s["source"] for s in result["snapshots"]] == ["calendar", "calendar"]
     assert tracking_hub.selected == "one"
@@ -227,7 +230,7 @@ def test_renewal_replays_collection_before_persisting(tracking_hub, bound_store,
         )
     assert renewal.calls == 1
     assert len(tracking_hub.requests("/")) == 2
-    assert reads == ["one", "one", "two"]
+    assert reads == ["two", "two", "one"]
     assert len(result["snapshots"]) == 2 and not result["errors"]
     assert result["binding"] == "synthetic-binding"
 
@@ -307,9 +310,9 @@ def test_mcp_sync_defaults_and_partial_result(tracking_hub, bound_store, monkeyp
     result = asyncio.run(server.call_tool("sync_changes", {})).structured_content
     assert result["status"] == "partial"
     assert [(e["child_id"], e["source"]) for e in result["errors"]] == [
-        ("one", "calendar"), ("two", "calendar"),
+        ("two", "calendar"), ("one", "calendar"),
     ]
-    assert tracking_hub.read_by(DOWNLOAD) == ["one", "two"]  # Attachments by default.
+    assert tracking_hub.read_by(DOWNLOAD) == ["two"]  # Attachments by default.
     assert sleeps and all(0 < delay <= 1.0 for delay in sleeps)  # Paced by default.
 
 
@@ -344,6 +347,55 @@ def test_http_collection_and_disabled_includes(tracking_hub, tracker):
     assert result["snapshots"][0]["items"][0]["attachments"][0]["status"] == "available"
     assert not result["attachment_checks"]
     assert not tracking_hub.requests(DOWNLOAD)
+
+
+def docx(text):
+    content = BytesIO()
+    with ZipFile(content, "w") as archive:
+        archive.writestr("word/document.xml", (
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            f"<w:body><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:body></w:document>"
+        ))
+    return content.getvalue()
+
+
+def test_settled_attachment_reads_are_reused_across_children_and_syncs(tracking_hub, tracker):
+    tracking_hub.route(NEWS, lambda request, child: {"items": [{"id": "post", "attachments": [{
+        "title": f"{id_}.docx",
+        "url": f"/Resources/Resource/Download/{id_}?api=IM2&ModuleType=NewsItem&ConnectionId=post",
+    } for id_ in ("123", "124")]}]})
+    downloads = []
+
+    def download(request, child):
+        file_id = request.url.path.rsplit("/", 1)[1]
+        downloads.append(file_id)
+        if downloads == ["123", "124"]:
+            return httpx.Response(503)
+        return httpx.Response(200, content=docx(f"File {file_id}"))
+
+    for id_ in ("123", "124"):
+        tracking_hub.route(f"/Resources/Resource/Download/{id_}", download, method="GET")
+
+    def sync():
+        result = tracker.sync(sources=["news"], consumer="agent", request_delay_seconds=0)
+        return {(c["child_id"], c["attachment_id"], c["status"])
+                for c in result["attachment_checks"]}, result
+
+    checks, _ = sync()
+    # Files shared between children are read once; a failed read is not retried in a sync.
+    assert downloads == ["123", "124"]
+    assert checks == {(child, id_, status) for child in ("one", "two")
+                      for id_, status in (("123", "extracted"), ("124", "fetch_failed"))}
+    sync()
+    assert downloads == ["123", "124", "124"]  # Only the failed read is retried.
+    checks, result = sync()
+    assert downloads == ["123", "124", "124"]
+    assert result["new_changes"] == 0
+    assert checks == {
+        (child, id_, "extracted") for child in ("one", "two") for id_ in ("123", "124")
+    }
+    post = tracker.changes.get("agent")["changes"][-1]["after"]
+    assert [a["text"] for a in post["attachments"]] == ["File 123", "File 124"]
 
 
 def test_extraction_budget_changes_are_not_content_changes(tmp_path):

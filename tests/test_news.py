@@ -57,7 +57,8 @@ def test_news_merges_child_ids_and_sorts(fake_hub, hub, requested, expected):
     fake_hub.route(NEWS, news)
     items = News(hub).items(requested)
     assert [item.id for item in items] == expected
-    reads = list(dict.fromkeys(requested)) if requested is not None else ["first", "second"]
+    targets = list(dict.fromkeys(requested)) if requested is not None else ["first", "second"]
+    reads = fake_hub.visiting_order(targets)
     assert fake_hub.read_by(NEWS) == reads
     assert fake_hub.selected == "second"
     shared = next((item for item in items if item.id == "shared"), None)
@@ -76,14 +77,14 @@ def test_news_fetches_only_page_attachments_once_and_restores_selection(
     kwargs = {} if mode == "inline" else {"include_attachments": False}
     items = News(hub).items(limit=1, **kwargs)
     assert len(items) == 1
-    assert items[0].child_ids == ["first", "second"]
+    assert items[0].child_ids == ["second", "first"]
     attachment = items[0].attachments[0]
     assert attachment.status == ("extracted" if mode == "inline" else "available")
     if mode == "inline":
         assert attachment.text == "Synthetic" and attachment.truncated
         assert attachment.content_sha256 == hashlib.sha256(docx).hexdigest()
-    # Downloaded once, for the newest item only, while its first child was selected.
-    assert fake_hub.read_by(DOWNLOAD) == (["first"] if mode == "inline" else [])
+    # Downloaded once, for the newest item only, while one of its children was selected.
+    assert fake_hub.read_by(DOWNLOAD) == (["second"] if mode == "inline" else [])
     if mode == "followup":
         assert News(hub).attachment("second", "7", "123").status == "extracted"
         assert fake_hub.read_by(DOWNLOAD) == ["second"]

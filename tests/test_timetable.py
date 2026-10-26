@@ -42,7 +42,7 @@ def test_timetable_form_dates_dst_details_and_separate_children(fake_hub, hub, c
         assert items[0].room == "Room A" and items[0].teachers == "Teacher A, Teacher B"
         assert items[0].notes == "Synthetic change" and items[0].details == "Synthetic group"
     # One request per child, even across DST.
-    assert fake_hub.read_by(PATH) == targets
+    assert fake_hub.read_by(PATH) == fake_hub.visiting_order(targets)
     assert fake_hub.selected == "second"
     offset = datetime.now(ZoneInfo("Europe/Stockholm")).utcoffset()
     for request in fake_hub.requests(PATH):
@@ -63,7 +63,7 @@ def test_invalid_timetable_fails_closed_and_restores(fake_hub, hub, payload):
     with pytest.raises(UnexpectedInfoMentorResponse) as error:
         Timetable(hub).lessons(date(2026, 10, 23), date(2026, 10, 23))
     assert "private-invalid" not in str(error.value)
-    assert fake_hub.read_by(PATH) == ["first"]
+    assert fake_hub.read_by(PATH) == ["second"]
     assert fake_hub.selected == "second"
 
 

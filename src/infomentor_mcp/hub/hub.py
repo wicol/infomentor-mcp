@@ -60,7 +60,7 @@ class Hub:
         """Run `operation`, renew an expired session and replay it once, then persist rotated
         cookies. Operations that write must catch expiry themselves once a write was sent."""
         with self.store.locked():
-            self.pupils.original_id = None
+            self.pupils.original_id = self.pupils.selected_id = None
             self.refresh()
             persist = True
             completed = False
@@ -85,6 +85,8 @@ class Hub:
         if self.renewer is None:
             raise AuthenticationExpiredError("InfoMentor session expired; run auth login again.")
         self.transport.reset(self.renewer.renew(self.transport.session()))
+        # A renewed web session has its own server-side pupil selection.
+        self.pupils.selected_id = None
         if self.pupils.original_id is not None:
             self.pupils.select(self.pupils.original_id)
 

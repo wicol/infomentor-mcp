@@ -29,7 +29,8 @@ class PupilSwitcher:
     """Hub shows one selected pupil at a time, for the whole session.
 
     Every switch is confirmed by name before data is read, and operations restore the
-    pupil that was selected before they started.
+    pupil that was selected before they started. The session lock means only this
+    switcher changes the selection, so switching to the already selected pupil is skipped.
     """
 
     def __init__(self, transport: HubTransport) -> None:
@@ -37,6 +38,7 @@ class PupilSwitcher:
         self.linked_ids: set[str] = set()
         self.expected_names: dict[str, str] = {}
         self.original_id: str | None = None
+        self.selected_id: str | None = None
 
     @staticmethod
     def selected_name(page: str) -> str | None:
@@ -63,8 +65,36 @@ class PupilSwitcher:
         return child
 
     def discover(self) -> list[Child]:
-        """Switch to every linked pupil once to learn and verify its name."""
+        """Switch to every linked pupil once to learn and verify its name, then restore the
+        original selection."""
+        children = self._discover()
+        self.select(self.original_id)
+        return children
+
+    @contextmanager
+    def visiting(self, child_ids: list[str] | None = None):
+        """Discover and yield the requested children, the already selected one first, then
+        restore the original selection. None selects all linked children; [] selects none."""
+        children = self._discover()
+        try:
+            targets = children if child_ids is None else [
+                self.find(children, id_) for id_ in dict.fromkeys(child_ids)
+            ]
+            yield sorted(targets, key=lambda child: child.id != self.selected_id)
+        finally:
+            self.select(self.original_id)
+
+    def select(self, child_id: str) -> None:
+        if child_id not in self.linked_ids:
+            raise UnknownChild("The requested child is not linked to this InfoMentor account.")
+        if child_id != self.selected_id:
+            self._switch(child_id)
+            self.selected_id = child_id
+
+    def _discover(self) -> list[Child]:
+        """Verify every linked pupil, leaving the last one selected unless discovery fails."""
         self.expected_names = {}
+        self.selected_id = None
         page = self.transport.get_page("/")
         child_ids = parse_child_ids(page)
         initial_name = self.selected_name(page)
@@ -73,54 +103,38 @@ class PupilSwitcher:
                 "Hub page did not contain linked pupil switchers and a selected pupil name."
             )
         self.linked_ids = set(child_ids)
+        self.original_id = None
         children: list[Child] = []
-        original_id: str | None = None
-        last_selected_id: str | None = None
         try:
             for child_id in child_ids:
-                name = self.selected_name(self.select(child_id))
+                name = self.selected_name(self._switch(child_id))
                 if name is None:
                     raise UnexpectedInfoMentorResponse(
                         "Hub did not expose the selected pupil name after switching pupil."
                     )
-                is_selected = self.same_name(name, initial_name)
                 if any(self.same_name(name, child.name) for child in children):
                     raise UnexpectedInfoMentorResponse(
                         "Pupil selection is ambiguous or the switch was ignored; "
                         "no school data read."
                     )
+                self.selected_id = child_id
+                is_selected = self.same_name(name, initial_name)
                 if is_selected:
-                    original_id = self.original_id = child_id
+                    self.original_id = child_id
                 children.append(Child(id=child_id, name=name, selected=is_selected))
                 self.expected_names[child_id] = name
-                last_selected_id = child_id
-            if original_id is None:
+            if self.original_id is None:
                 raise UnexpectedInfoMentorResponse(
                     "Could not identify the original pupil selection; no school data read."
                 )
-        finally:
-            if original_id and last_selected_id != original_id:
-                self.select(original_id)
+        except BaseException:
+            if self.original_id is not None:
+                self.select(self.original_id)
+            raise
         return children
 
-    @contextmanager
-    def visiting(self, child_ids: list[str] | None = None):
-        """Discover, validate the requested children, and restore the original selection
-        afterwards. None selects all linked children; an empty list selects none."""
-        children = self.discover()
-        targets = children if child_ids is None else [
-            self.find(children, id_) for id_ in dict.fromkeys(child_ids)
-        ]
-        original = next(child for child in children if child.selected)
-        try:
-            yield targets
-        finally:
-            self.select(original.id)
-
-    def select(self, child_id: str) -> str:
+    def _switch(self, child_id: str) -> str:
         """Switch pupil, following only same-origin redirects; returns the confirmed page."""
-        if child_id not in self.linked_ids:
-            raise UnknownChild("The requested child is not linked to this InfoMentor account.")
         destination = f"{HUB_ORIGIN}/Account/PupilSwitcher/SwitchPupil/{quote(child_id, safe='')}"
         for _ in range(6):
             response = self.transport.client.get(destination, follow_redirects=False)

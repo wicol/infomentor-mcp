@@ -100,6 +100,13 @@ class ChangeStore:
                     "baselines_created": baselines, "errors": batch["errors"],
                     "attachment_checks": batch.get("attachment_checks", [])}
 
+    def known_attachments(self) -> list[dict]:
+        """Every attachment in the current news snapshots, repeated for shared news."""
+        with self.connect() as db:
+            rows = db.execute("SELECT payload FROM snapshots").fetchall()
+            items = [json.loads(payload) for (payload,) in rows]
+        return [attachment for item in items for attachment in item.get("attachments", [])]
+
     def check_binding(self, binding: str | None) -> None:
         with self.connect() as db:
             self._bind(db, binding, create=False)
